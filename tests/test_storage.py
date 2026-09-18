@@ -71,13 +71,21 @@ def test_atomic_file_writer_creates_only_info_md():
         parent_dir = os.path.dirname(path)
         assert not os.path.exists(os.path.join(parent_dir, "Fundamentals.md"))
 
-        # Verify content contains key sections
+        # Verify content contains key sections and explicit assumptions
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
             assert "# Project: Cyber Samurai: Origin/V1" in content
             assert "## Snapshot" in content
             assert "## Collection Identity" in content
+            assert "OpenSea Collection Age" in content
+            assert "calculated from OpenSea created_date" in content
             assert "## Trade Economics" in content
+            assert "### A. Observed Market Data (Factual / API-Sourced)" in content
+            assert "### B. Model Assumptions (Configured Trading Strategy Parameters)" in content
+            assert "[ASSUMPTION] Entry-Offer Premium" in content
+            assert "[ASSUMPTION] Target Exit Discount" in content
+            assert "[ASSUMPTION] Gas Estimate" in content
+            assert "### C. Modelled Results (Theoretical Estimates)" in content
             assert "## BOT Final Result" in content
             assert "PASS" in content
 
@@ -103,3 +111,32 @@ def test_state_store_deduplication():
         # Checkpoints
         store.save_checkpoint("collections", "cursor_123")
         assert store.get_checkpoint("collections") == "cursor_123"
+
+def test_state_store_monitored_collections():
+    """Tests the decoupled monitored collections universe scheduling pool."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = os.path.join(temp_dir, "bot.db")
+        store = StateStore(db_path)
+
+        # Initially empty
+        assert store.get_monitored_collection_count() == 0
+
+        # Add discovered slugs
+        store.add_discovered_slugs(["col-a", "col-b", "col-c"], source="discovery")
+        assert store.get_monitored_collection_count() == 3
+
+        # Add duplicate should be ignored
+        store.add_discovered_slugs(["col-a", "col-d"], source="discovery")
+        assert store.get_monitored_collection_count() == 4
+
+        # Queue order: un-evaluated collections first
+        due = store.get_collections_due_for_evaluation(limit=2)
+        assert len(due) == 2
+
+        # Mark one as evaluated
+        store.mark_collection_evaluated(due[0])
+
+        # Next fetch should prioritize remaining un-evaluated
+        next_due = store.get_collections_due_for_evaluation(limit=2)
+        assert due[0] not in next_due
+

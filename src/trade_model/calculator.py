@@ -7,20 +7,25 @@ from ..models.trade import (
     TradeEconomics,
 )
 
+KNOWN_OPENSEA_FEE_RECIPIENTS = {
+    "0x0000a26b00c1f0df003000390027140000faa719",  # Seaport 1.5/1.6 OpenSea Fee Collector
+    "0x5b3256965e7c3cf26e11fcaf296dfc8807c01073",  # OpenSea Legacy Fee Wallet
+}
+
 def extract_fees_from_collection(collection: CollectionMetadata) -> Tuple[Optional[float], Optional[float], bool]:
     """
     Extracts marketplace fee % and creator royalty % from OpenSea collection fees.
     OpenSea API returns fees as a list of {fee: float, recipient: str, required: bool}.
-    OpenSea fee values in v2 API are typically percentages (e.g. 0.5 for 0.5% or 0.005).
-    OpenSea official fee recipients are either marked or identified by fee structure.
-    If no fee information is returned or cannot be determined reliably, returns (None, None, False).
+    OpenSea fee values in v2 API are typically percentages (e.g. 1.0 for 1.0% or 0.01).
+    If the marketplace fee cannot be determined reliably from collection metadata,
+    returns (None, creator_royalty_pct, False).
     """
     if not collection.fees:
         return None, None, False
 
-    marketplace_fee_pct = 0.0
-    creator_royalty_pct = 0.0
-    found_any = False
+    marketplace_fee_pct: Optional[float] = None
+    creator_royalty_pct: Optional[float] = None
+    mp_fee_found = False
 
     for f in collection.fees:
         fee_val = f.fee
@@ -29,23 +34,18 @@ def extract_fees_from_collection(collection: CollectionMetadata) -> Tuple[Option
         # If fee_val >= 0.1 (e.g. 2.5 or 0.5), it is expressed in percent.
         normalized_fee_pct = (fee_val * 100.0) if fee_val < 0.1 else fee_val
 
-        # Recipient classification: OpenSea protocol fee recipient vs creator
         recipient_lower = f.recipient.lower() if f.recipient else ""
-        # Known OpenSea fee recipients / addresses, or required fee
-        if "opensea" in recipient_lower or "0x0000a26b00c1f0df003000390027140000faa719" in recipient_lower:
-            marketplace_fee_pct += normalized_fee_pct
-            found_any = True
+        if "opensea" in recipient_lower or recipient_lower in KNOWN_OPENSEA_FEE_RECIPIENTS:
+            marketplace_fee_pct = (marketplace_fee_pct or 0.0) + normalized_fee_pct
+            mp_fee_found = True
         else:
-            creator_royalty_pct += normalized_fee_pct
-            found_any = True
+            creator_royalty_pct = (creator_royalty_pct or 0.0) + normalized_fee_pct
 
-    # If marketplace fee was not explicitly labeled, check if there are multiple fees
-    if marketplace_fee_pct == 0.0 and len(collection.fees) > 1:
-        # One of them is likely the platform fee
-        pass
+    # If OpenSea marketplace fee is not reliably present in metadata, do NOT assume a fee
+    if not mp_fee_found:
+        return None, creator_royalty_pct, False
 
-    # Reliable only if fee schedule was populated
-    return marketplace_fee_pct, creator_royalty_pct, found_any
+    return marketplace_fee_pct, (creator_royalty_pct or 0.0), True
 
 def compute_trade_economics(
     current_floor: Optional[float],

@@ -103,7 +103,8 @@ def render_info_md(
     # Filter Criteria Section
     filter_sections = []
     for crit_name, crit in filter_report.criteria.items():
-        filter_sections.append(f"""### {crit.name.replace('_', ' ').title()}
+        title = "OpenSea Collection Age" if crit_name == "project_age" else crit.name.replace('_', ' ').title()
+        filter_sections.append(f"""### {title}
 - **Threshold**: {crit.threshold}
 - **Actual Value**: {crit.actual_value}{crit.unit}
 - **Formula**: `{crit.formula}`
@@ -131,7 +132,7 @@ def render_info_md(
 - **Blockchain**: {primary_chain}
 - **Contract Address**: `{primary_contract}`
 - **Collection Slug**: {collection.slug}
-- **OpenSea Collection Age**: {project_age_days_str}
+- **OpenSea Collection Age**: {project_age_days_str} (calculated from OpenSea created_date)
 - **OpenSea Created Date**: {collection.created_date or 'UNKNOWN'}
 
 ## Collection References
@@ -193,22 +194,22 @@ def render_info_md(
 
 > {trade_economics.disclaimer}
 
-### A. Observed Market Data
+### A. Observed Market Data (Factual / API-Sourced)
 - **Observed Top Offer**: {top_offer_str}
 - **Current Floor**: {curr_floor_str}
 - **Marketplace Fee (from OpenSea API)**: {mp_fee_pct_str}
 - **Creator Royalty (from OpenSea API)**: {royalty_pct_str}
-- **Fee Data Reliability**: {'RELIABLE' if obs.fees_reliable else 'INCOMPLETE / UNKNOWN (fee could not be confirmed)'}
+- **Fee Data Reliability**: {'RELIABLE' if obs.fees_reliable else 'INCOMPLETE / UNKNOWN (applicable OpenSea marketplace fee not confirmed)'}
 
-### B. Model Assumptions
-- **Modelled Entry Offer Premium**: +{asm.entry_offer_premium_pct:.1f}% above top offer
-- **Target Sale Discount From Floor**: -{asm.target_sale_discount_from_floor_pct:.1f}% below floor
-- **Estimated Gas Cost**: {asm.gas_estimate_eth:.4f} ETH
+### B. Model Assumptions (Configured Trading Strategy Parameters)
+- **[ASSUMPTION] Entry-Offer Premium**: +{asm.entry_offer_premium_pct:.1f}% above observed top offer
+- **[ASSUMPTION] Target Exit Discount**: -{asm.target_sale_discount_from_floor_pct:.1f}% below current floor
+- **[ASSUMPTION] Gas Estimate**: {asm.gas_estimate_eth:.4f} ETH
 
-### C. Modelled Results
-- **Modelled Entry Offer (Hypothetical Buy)**: {modelled_entry_str}
-- **Target Exit Price (Hypothetical Sell)**: {target_exit_str}
-- **Gross Spread**: {gross_spread_str}
+### C. Modelled Results (Theoretical Estimates)
+- **Modelled Entry Offer (Hypothetical Buy Price)**: {modelled_entry_str}
+- **Target Exit Price (Hypothetical Sell Price)**: {target_exit_str}
+- **Gross Spread (Exit - Entry)**: {gross_spread_str}
 - **Estimated Selling Marketplace Fee**: {est_mp_fee_str}
 - **Estimated Creator Royalty Fee**: {est_royalty_str}
 - **Estimated Total Gas Cost**: {est_gas_str}

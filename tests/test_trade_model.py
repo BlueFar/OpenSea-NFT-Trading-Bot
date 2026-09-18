@@ -76,3 +76,50 @@ def test_trade_model_currency_mismatch():
     )
     assert econ.modelled.is_complete_and_reliable is False
     assert "CURRENCY_MISMATCH" in econ.modelled.status_note
+
+def test_trade_model_only_creator_royalty_marks_incomplete():
+    """Validates that if only creator fee is present and no OpenSea fee, it does NOT assume 0% or fallback fee."""
+    col = CollectionMetadata(
+        slug="creator-only",
+        name="Creator Only",
+        fees=[Fee(fee=5.0, recipient="0xcreatoraddress", required=False)]
+    )
+    econ = compute_trade_economics(
+        current_floor=1.0,
+        observed_top_offer=0.5,
+        collection=col,
+    )
+    assert econ.observed.marketplace_fee_pct is None
+    assert econ.observed.fees_reliable is False
+    assert econ.modelled.is_complete_and_reliable is False
+    assert econ.modelled.estimated_marketplace_fee is None
+    assert "INCOMPLETE" in econ.modelled.status_note
+
+def test_trade_model_known_seaport_fee_recipient():
+    """Validates OpenSea official Seaport fee collector address extraction."""
+    col = CollectionMetadata(
+        slug="doodles",
+        name="Doodles",
+        fees=[
+            Fee(fee=1.0, recipient="0x0000a26b00c1f0df003000390027140000faa719", required=True),
+            Fee(fee=5.0, recipient="0xd1f124cc900624e1ff2d923180b3924147364380", required=False),
+        ]
+    )
+    econ = compute_trade_economics(
+        current_floor=2.0,
+        observed_top_offer=1.0,
+        collection=col,
+        entry_offer_premium_pct=1.0,
+        target_sale_discount_from_floor_pct=5.0,
+        gas_estimate_eth=0.005,
+    )
+    assert econ.observed.marketplace_fee_pct == 1.0
+    assert econ.observed.creator_royalty_pct == 5.0
+    assert econ.observed.fees_reliable is True
+    assert econ.modelled.is_complete_and_reliable is True
+    # Exit price = 2.0 * 0.95 = 1.90
+    # MP fee = 1.90 * 0.01 = 0.019 ETH
+    assert pytest.approx(econ.modelled.estimated_marketplace_fee, rel=1e-4) == 0.019
+    # Creator fee = 1.90 * 0.05 = 0.095 ETH
+    assert pytest.approx(econ.modelled.estimated_creator_royalty, rel=1e-4) == 0.095
+

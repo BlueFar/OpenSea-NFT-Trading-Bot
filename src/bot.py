@@ -55,6 +55,10 @@ class NFTBot:
             state_store=self.state_store,
             config=self.config,
         )
+        # Seed watchlist into monitored collections universe if present
+        if self.config.discovery.watchlist:
+            self.state_store.add_discovered_slugs(self.config.discovery.watchlist, source="watchlist")
+
         self._running = False
         self._setup_signals()
 
@@ -72,47 +76,61 @@ class NFTBot:
         logger.info("Bot stopped. Resources released.")
 
     def run_daemon(self, dry_run: bool = False):
-        """Runs the 24/7 monitoring loop with independent discovery and evaluation schedules."""
+        """
+        Runs the 24/7 monitoring loop with independently scheduled:
+        1. Progressive catalog discovery crawl (cadence: discovery_interval_seconds)
+        2. Market-data evaluation & candidate refresh (cadence: candidate_refresh_interval_seconds)
+        """
         self._running = True
-        logger.info("Starting 24/7 NFT Monitoring Bot daemon (dry_run=%s)...", dry_run)
+        logger.info(
+            "Starting 24/7 NFT Monitoring Bot daemon (dry_run=%s, discovery_cadence=%ds, eval_cadence=%ds)...",
+            dry_run,
+            self.config.scheduler.discovery_interval_seconds,
+            self.config.scheduler.candidate_refresh_interval_seconds,
+        )
         self.state_store.update_telemetry("bot_status", "RUNNING")
 
         last_discovery_time = 0.0
-        pending_queue: List[str] = []
+        last_evaluation_time = 0.0
 
         while self._running:
             now = time.time()
 
-            # 1. Independent Discovery Cycle
-            if now - last_discovery_time >= self.config.scheduler.discovery_interval_seconds or last_discovery_time == 0.0:
-                logger.info("Initiating progressive discovery cycle...")
+            # 1. Independent Discovery Cycle (Progressive crawl of /api/v2/collections)
+            if (now - last_discovery_time >= self.config.scheduler.discovery_interval_seconds) or (last_discovery_time == 0.0):
+                logger.info("Initiating progressive catalog discovery cycle...")
                 try:
                     new_slugs = self.discovery.discover_next_batch()
-                    for s in new_slugs:
-                        if s not in pending_queue:
-                            pending_queue.append(s)
+                    self.state_store.add_discovered_slugs(new_slugs, source="discovery")
                     last_discovery_time = now
                     self.state_store.update_telemetry("last_discovery_time", now)
-                    self.state_store.update_telemetry("pending_queue_size", len(pending_queue))
+                    self.state_store.update_telemetry("total_monitored_universe", self.state_store.get_monitored_collection_count())
+                    logger.info("Discovery cycle finished. Monitored universe now contains %d collections.", self.state_store.get_monitored_collection_count())
                 except Exception as e:
-                    logger.error("Error during discovery cycle: %s", e)
+                    logger.error("Error during progressive discovery cycle: %s", e)
 
-            # 2. Candidate Evaluation Cycle
-            if pending_queue:
-                # Process a batch of pending collections
-                batch_to_eval = pending_queue[:10]
-                pending_queue = pending_queue[10:]
-                logger.info("Evaluating batch of %d collections (%d remaining in queue)...", len(batch_to_eval), len(pending_queue))
+            # 2. Independent Candidate Evaluation / Refresh Cycle
+            if (now - last_evaluation_time >= self.config.scheduler.candidate_refresh_interval_seconds) or (last_evaluation_time == 0.0):
+                # Retrieve collections due for evaluation (oldest evaluated first)
+                slugs_to_eval = self.state_store.get_collections_due_for_evaluation(limit=10)
+                if slugs_to_eval:
+                    logger.info("Starting candidate refresh cycle for %d collections...", len(slugs_to_eval))
+                    for slug in slugs_to_eval:
+                        if not self._running:
+                            break
+                        try:
+                            self.evaluator.evaluate_collection(slug=slug, dry_run=dry_run, stop_on_first_failure=True)
+                            self.state_store.mark_collection_evaluated(slug)
+                        except Exception as e:
+                            logger.error("Unexpected error evaluating collection %s: %s", slug, e)
 
-                for slug in batch_to_eval:
-                    if not self._running:
-                        break
-                    try:
-                        self.evaluator.evaluate_collection(slug=slug, dry_run=dry_run, stop_on_first_failure=True)
-                    except Exception as e:
-                        logger.error("Unexpected error evaluating collection %s: %s", slug, e)
+                    last_evaluation_time = now
+                    self.state_store.update_telemetry("last_evaluation_time", now)
+                else:
+                    logger.info("Candidate refresh cycle: no collections currently in monitored universe.")
+                    last_evaluation_time = now
 
-            # Sleep briefly before next check
+            # Sleep briefly before next timer tick
             time.sleep(1.0)
 
         self.state_store.update_telemetry("bot_status", "STOPPED")
@@ -159,6 +177,7 @@ class NFTBot:
         summary = self.state_store.get_status_summary()
         print("\n================ BOT STATUS SUMMARY ================")
         print(f"Total Candidates Recorded: {summary.get('total_candidates_found', 0)}")
+        print(f"Total Monitored Universe:  {summary.get('total_monitored_collections', 0)}")
         print("\nDiscovery Checkpoints:")
         for source, info in summary.get("checkpoints", {}).items():
             print(f"  - Source '{source}': cursor={info.get('cursor') or 'START'}, updated_at={info.get('updated_at')}")

@@ -76,7 +76,7 @@ class FilterEngine:
         detection_dt_utc: datetime,
         now_iso: str,
     ) -> FilterCriterionResult:
-        threshold = f"> {self.config.project_age.min_age_days:.1f} days"
+        threshold = f"> {self.config.project_age.min_age_days:.1f} days (OpenSea Collection Age)"
         formula = "detection_date - opensea_created_date"
         source = "GET /api/v2/collections/{slug} -> created_date"
 
@@ -122,7 +122,7 @@ class FilterEngine:
             data_quality=DataQualityState.AVAILABLE,
             timestamp=now_iso,
             source=source,
-            notes=f"OpenSea Collection Age is {age_days:.2f} days.",
+            notes=f"OpenSea Collection Age is {age_days:.2f} days (calculated from OpenSea created_date, not off-chain project founding date).",
         )
 
     def _eval_verification(self, collection: CollectionMetadata, now_iso: str) -> FilterCriterionResult:
