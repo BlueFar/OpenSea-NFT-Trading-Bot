@@ -110,6 +110,11 @@ class CollectionEvaluator:
             early_exit_threshold=max_allowed_listings,
         )
 
+        if listed_count is None:
+            logger.warning("[%s] Failed to retrieve active listings count from API. Rejecting (fails closed).", slug)
+            if stop_on_first_failure:
+                return None
+
         listing_metrics = compute_listing_metrics(
             total_supply=total_supply,
             listed_items=listed_count,
@@ -129,11 +134,27 @@ class CollectionEvaluator:
         start_ts, _ = get_calendar_day_utc_bounds(seven_days[0], tz_name)
         sale_events = self.provider.get_sale_events(slug, after_timestamp=start_ts)
 
-        sales_metrics = compute_sales_metrics(
-            events=sale_events,
-            tz_name=tz_name,
-            has_sufficient_history=True,
-        )
+        if sale_events is None:
+            logger.warning("[%s] Failed to retrieve sale events from API. Failing closed with DATA_INSUFFICIENT.", slug)
+            sales_metrics = SalesMetrics(
+                seven_day_sales_items=0,
+                seven_day_sales_transactions=0,
+                average_sales_items_per_day=0.0,
+                average_transactions_per_day=0.0,
+                max_daily_sales_items=0,
+                max_daily_transactions=0,
+                min_daily_sales_items=0,
+                min_daily_transactions=0,
+                data_quality=DataQualityState.ERROR,
+            )
+            if stop_on_first_failure:
+                return None
+        else:
+            sales_metrics = compute_sales_metrics(
+                events=sale_events,
+                tz_name=tz_name,
+                has_sufficient_history=True,
+            )
 
         # Early check: Trading Frequency
         cfg_tf = self.config.filters.trading_frequency

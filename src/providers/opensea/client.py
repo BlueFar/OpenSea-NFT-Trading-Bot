@@ -6,6 +6,18 @@ from ...utils.logging import setup_logger
 
 logger = setup_logger("opensea_client")
 
+class OpenSeaApiError(Exception):
+    """Base exception for OpenSea API communication failures."""
+    pass
+
+class OpenSeaAuthError(OpenSeaApiError):
+    """Raised when OpenSea API returns 401 Unauthorized or 403 Forbidden (e.g. invalid or expired API key)."""
+    pass
+
+class OpenSeaRateLimitError(OpenSeaApiError):
+    """Raised when rate limit retries are exhausted."""
+    pass
+
 class OpenSeaClient:
     """
     Resilient HTTP client for OpenSea v2 API.
@@ -99,8 +111,8 @@ class OpenSeaClient:
                     continue
 
                 if resp.status_code in (401, 403):
-                    logger.error("OpenSea Authentication Error (%d) for %s. Verify OPENSEA_API_KEY.", resp.status_code, path)
-                    return None
+                    logger.error("OpenSea Authentication Error (%d) for %s. API key invalid or expired.", resp.status_code, path)
+                    raise OpenSeaAuthError(f"OpenSea Authentication failed ({resp.status_code}) for {path}: API key invalid or expired.")
 
                 if resp.status_code >= 500:
                     wait_time = (self.backoff_factor ** attempt) + random.uniform(0.5, 1.5)
@@ -115,6 +127,8 @@ class OpenSeaClient:
                 wait_time = (self.backoff_factor ** attempt) + random.uniform(0.5, 1.5)
                 logger.warning("Network connection/timeout error (%s). Retrying in %.2fs (attempt %d/%d)...", str(e)[:100], wait_time, attempt + 1, self.max_retries)
                 time.sleep(wait_time)
+            except (OpenSeaAuthError, OpenSeaRateLimitError):
+                raise
             except Exception as e:
                 logger.error("Unexpected error requesting %s: %s", path, str(e))
                 return None

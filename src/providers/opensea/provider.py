@@ -110,14 +110,21 @@ class OpenSeaProvider(CollectionDataProvider):
         self._set_cache(cache_key, points)
         return points
 
-    def get_sale_events(self, slug: str, after_timestamp: int) -> List[SaleEvent]:
-        """Paginates sale events after the given timestamp with safeguards."""
-        all_events: List[SaleEvent] = []
+    def get_sale_events(
+        self,
+        slug: str,
+        after_timestamp: int,
+        max_pages: int = 20,
+    ) -> Optional[List[SaleEvent]]:
+        """
+        Fetches sale events occurring after the given timestamp.
+        Returns None if the API request fails, preventing false zero-sales counts.
+        """
+        all_events = []
         next_cursor = None
         seen_cursors = set()
-        max_pages = 20  # Safeguard against infinite pagination
 
-        for _ in range(max_pages):
+        for page_idx in range(max_pages):
             params: Dict[str, Any] = {
                 "event_type": "sale",
                 "after": after_timestamp,
@@ -131,7 +138,10 @@ class OpenSeaProvider(CollectionDataProvider):
                 params["next"] = next_cursor
 
             data = self.client.get(f"/api/v2/events/collection/{slug}", params=params)
-            if not data:
+            if data is None:
+                if page_idx == 0:
+                    logger.warning("Failed to retrieve sale events for %s on page 0. Returning None.", slug)
+                    return None
                 break
 
             events = parse_sale_events(data)
@@ -147,11 +157,12 @@ class OpenSeaProvider(CollectionDataProvider):
         self,
         slug: str,
         early_exit_threshold: Optional[int] = None,
-    ) -> Tuple[int, bool]:
+    ) -> Tuple[Optional[int], bool]:
         """
         Paginates active listings. If early_exit_threshold is provided and
         the accumulated count exceeds it, halts pagination immediately.
         Returns (accumulated_count, is_early_exit_exceeded).
+        If API fails, returns (None, False) rather than assuming zero listings.
         """
         total_count = 0
         next_cursor = None
@@ -168,7 +179,10 @@ class OpenSeaProvider(CollectionDataProvider):
                 params["next"] = next_cursor
 
             data = self.client.get(f"/api/v2/listings/collection/{slug}/all", params=params)
-            if not data:
+            if data is None:
+                if page_idx == 0:
+                    logger.warning("Failed to retrieve active listings for %s on page 0. Returning (None, False).", slug)
+                    return None, False
                 break
 
             listings, next_cursor = parse_listings(data)

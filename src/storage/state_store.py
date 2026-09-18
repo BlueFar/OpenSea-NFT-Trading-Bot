@@ -130,10 +130,10 @@ class StateStore:
             return row[0] if row else None
 
     def is_candidate_recorded_today(self, slug: str, date_str: str) -> bool:
-        """Checks if this candidate was already processed/recorded for the given calendar day."""
+        """Checks if this candidate was already processed/recorded for the given calendar day as a passing candidate."""
         with self._get_connection() as conn:
             c = conn.cursor()
-            c.execute("SELECT 1 FROM candidate_history WHERE slug=? AND date_str=?", (slug, date_str))
+            c.execute("SELECT 1 FROM candidate_history WHERE slug=? AND date_str=? AND is_pass=1", (slug, date_str))
             return c.fetchone() is not None
 
     def record_candidate(self, slug: str, date_str: str, is_pass: bool, reasons: str = ""):

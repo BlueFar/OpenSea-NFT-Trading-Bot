@@ -33,8 +33,8 @@ class CollectionDataProvider(ABC):
         pass
 
     @abstractmethod
-    def get_sale_events(self, slug: str, after_timestamp: int) -> List[SaleEvent]:
-        """Fetches sale events occurring after the given Unix epoch timestamp."""
+    def get_sale_events(self, slug: str, after_timestamp: int) -> Optional[List[SaleEvent]]:
+        """Fetches sale events occurring after the given Unix epoch timestamp. Returns None if API fails."""
         pass
 
     @abstractmethod
@@ -42,11 +42,11 @@ class CollectionDataProvider(ABC):
         self,
         slug: str,
         early_exit_threshold: Optional[int] = None,
-    ) -> Tuple[int, bool]:
+    ) -> Tuple[Optional[int], bool]:
         """
         Fetches active listings count. If early_exit_threshold is provided,
         aborts pagination as soon as accumulated count exceeds the threshold.
-        Returns (count, is_early_exit_exceeded).
+        Returns (count, is_early_exit_exceeded). If API fails, count is None.
         """
         pass
 
