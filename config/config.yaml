@@ -1,0 +1,48 @@
+general:
+  bot_timezone: "Asia/Kolkata"
+  data_root: "./data"
+  state_db_path: "./state/bot.db"
+  log_level: "INFO"
+
+discovery:
+  # Primary source uses GET /api/v2/collections with persistent cursor checkpointing
+  primary_source: "collections"
+  batch_size: 50
+  max_pages_per_cycle: 2            # Progressive crawl: advances N pages per discovery cycle
+  enable_top: true                  # Supplementary source: GET /api/v2/collections/top
+  enable_trending: true             # Supplementary source: GET /api/v2/collections/trending
+  chains: ["ethereum", "base", "polygon"]
+  watchlist: []                     # Optional explicit slugs to monitor
+
+filters:
+  trading_frequency:
+    metric: "average_daily_sales"   # Options: average_daily_sales, max_daily_sales, both
+    max_threshold: 2.0
+    sale_count_mode: "transactions" # Options: transactions (default), item_quantity
+  floor_change_1d:
+    max_change_pct: 8.0             # Requirement: < 8.0%
+  floor_change_7d:
+    max_change_pct: 10.0            # Requirement: < 10.0%
+  offer_to_floor:
+    enabled: false                  # Advisory / observe-only pending trading formula confirmation
+    min_ratio_pct: 40.0
+    formula: "modelled_entry_offer_to_floor" # Options: modelled_entry_offer_to_floor, floor_spread_to_entry_offer
+  listed_items:
+    max_listed_pct: 6.0             # Requirement: < 6.0%
+  verification:
+    required_status: ["verified"]   # Specifically blue checkmark
+  project_age:
+    min_age_days: 60.0              # Requirement: > 60.0 days (OpenSea Collection Age)
+
+trade_model:
+  entry_offer_premium_pct: 1.0      # Model assumption: bid placed 1.0% above observed top offer
+  target_sale_discount_from_floor_pct: 5.0 # Model assumption: exit discount below floor
+  gas_estimate_eth: 0.005           # Model assumption: gas costs in ETH
+  # No fallback marketplace fee: fee must be determined reliably from API, else marked UNKNOWN
+
+scheduler:
+  discovery_interval_seconds: 3600  # Progressive catalog crawl cadence
+  candidate_refresh_interval_seconds: 300 # Market data evaluation / refresh cadence
+  request_delay_seconds: 0.5        # Polite spacing between API calls
+  rate_limit_backoff_factor: 2.0
+  max_retries: 5
