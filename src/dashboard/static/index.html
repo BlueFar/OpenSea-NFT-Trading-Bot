@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenSea NFT Monitor — Bot Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="app-layout">
+    <!-- TOP NAVIGATION & CONTROL BAR -->
+    <header class="app-header">
+      <div class="header-brand">
+        <div class="brand-icon">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+          </svg>
+        </div>
+        <div>
+          <div class="brand-title">NFT Collection Monitor</div>
+          <div class="brand-subtitle">Stage 1 Deterministic BOT Dashboard</div>
+        </div>
+      </div>
+
+      <!-- BOT CONTROL BUTTONS & STATUS CAPSULE -->
+      <div class="header-controls">
+        <div class="status-capsule" id="botStatusCapsule">
+          <span class="status-dot" id="statusDot"></span>
+          <span class="status-label" id="statusText">CHECKING...</span>
+          <span class="status-meta" id="statusMeta"></span>
+        </div>
+
+        <div class="control-actions">
+          <label class="checkbox-label" title="Run discovery/evaluation without creating candidate files">
+            <input type="checkbox" id="dryRunToggle">
+            <span>Dry Run</span>
+          </label>
+          <button id="btnStartBot" class="btn btn-primary">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <polygon points="5 3 19 12 5 21 5 3"/>
+            </svg>
+            <span>Start Bot</span>
+          </button>
+          <button id="btnStopBot" class="btn btn-danger" disabled>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="4" y="4" width="16" height="16" rx="2"/>
+            </svg>
+            <span>Stop Bot</span>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- METRICS CARDS -->
+    <section class="metrics-grid">
+      <div class="metric-card">
+        <div class="metric-label">Daemon State</div>
+        <div class="metric-value-row">
+          <span class="metric-value" id="cardStatus">—</span>
+        </div>
+        <div class="metric-subtext" id="cardUptime">Uptime: —</div>
+      </div>
+
+      <div class="metric-card">
+        <div class="metric-label">Qualified Candidates</div>
+        <div class="metric-value-row">
+          <span class="metric-value text-accent" id="cardCandidates">0</span>
+        </div>
+        <div class="metric-subtext">Pass all 7 BOT filters</div>
+      </div>
+
+      <div class="metric-card">
+        <div class="metric-label">Monitored Universe</div>
+        <div class="metric-value-row">
+          <span class="metric-value" id="cardMonitored">0</span>
+        </div>
+        <div class="metric-subtext">Collections in SQLite catalog</div>
+      </div>
+
+      <div class="metric-card">
+        <div class="metric-label">Discovery Checkpoint</div>
+        <div class="metric-value-row">
+          <span class="metric-value text-mono text-sm" id="cardCursor">START</span>
+        </div>
+        <div class="metric-subtext" id="cardCheckpointTime">Source: collections</div>
+      </div>
+    </section>
+
+    <!-- LIVE 7-CONDITION INSPECTOR TOOL -->
+    <section class="panel-section">
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">Diagnostic Collection Inspector</h2>
+          <p class="section-desc">Test any collection slug or OpenSea URL in real-time against all 7 quantitative filter rules.</p>
+        </div>
+      </div>
+
+      <form id="inspectForm" class="inspect-bar">
+        <div class="input-wrapper">
+          <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"/>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+          <input type="text" id="inspectInput" placeholder="Enter collection slug or OpenSea URL (e.g. cryptopunks, doodles-official)..." required>
+        </div>
+        <button type="submit" id="btnInspect" class="btn btn-accent">
+          <span class="btn-text">Inspect 7 Conditions</span>
+          <span class="btn-spinner hidden"></span>
+        </button>
+      </form>
+
+      <!-- INSPECT RESULTS CONTAINER -->
+      <div id="inspectResults" class="inspect-results-container hidden">
+        <div class="inspect-summary-card">
+          <div class="summary-meta">
+            <span class="summary-slug" id="resSlug">—</span>
+            <span class="summary-status-badge" id="resOverallBadge">PENDING</span>
+          </div>
+          <div id="resRejectionAlert" class="rejection-alert hidden"></div>
+        </div>
+
+        <div class="criteria-grid" id="criteriaGrid">
+          <!-- 7 Condition Cards dynamically inserted here -->
+        </div>
+      </div>
+    </section>
+
+    <!-- MAIN EXPLORER TABS -->
+    <section class="panel-section">
+      <div class="tabs-header">
+        <button class="tab-btn active" data-tab="candidatesTab">
+          Qualified Candidates
+          <span class="tab-count" id="tabCandidatesCount">0</span>
+        </button>
+        <button class="tab-btn" data-tab="universeTab">
+          Monitored Universe
+          <span class="tab-count" id="tabUniverseCount">0</span>
+        </button>
+        <button class="tab-btn" data-tab="logsTab">
+          Live Activity Logs
+        </button>
+      </div>
+
+      <!-- TAB 1: QUALIFIED CANDIDATES -->
+      <div class="tab-content active" id="candidatesTab">
+        <div class="table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Project Name</th>
+                <th>Generated Artifact</th>
+                <th>File Size</th>
+                <th>Modified</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="candidatesTableBody">
+              <tr>
+                <td colspan="6" class="text-center py-6 text-muted">No candidates found yet.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- TAB 2: MONITORED UNIVERSE -->
+      <div class="tab-content" id="universeTab">
+        <div class="universe-toolbar">
+          <input type="text" id="universeSearchInput" placeholder="Filter collections by slug..." class="toolbar-search">
+          <button id="btnRefreshUniverse" class="btn btn-secondary">Refresh</button>
+        </div>
+        <div class="table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Collection Slug</th>
+                <th>Discovery Source</th>
+                <th>Evaluations</th>
+                <th>Last Evaluated (UTC)</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="universeTableBody">
+              <tr>
+                <td colspan="5" class="text-center py-6 text-muted">Loading collections...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- TAB 3: LIVE ACTIVITY LOGS -->
+      <div class="tab-content" id="logsTab">
+        <div class="logs-toolbar">
+          <div class="logs-meta">Showing last 150 lines from <code>bot.log</code></div>
+          <div class="logs-actions">
+            <label class="checkbox-label text-sm">
+              <input type="checkbox" id="autoScrollLogs" checked>
+              <span>Auto-Scroll</span>
+            </label>
+            <button id="btnRefreshLogs" class="btn btn-secondary btn-sm">Refresh Now</button>
+          </div>
+        </div>
+        <pre class="logs-terminal" id="logsTerminal">Loading logs...</pre>
+      </div>
+    </section>
+  </div>
+
+  <!-- DOSSIER VIEWER MODAL -->
+  <dialog id="dossierModal" class="dossier-dialog">
+    <div class="dialog-content">
+      <div class="dialog-header">
+        <div>
+          <h3 class="dialog-title" id="modalProjectTitle">Project Dossier</h3>
+          <span class="dialog-subtitle" id="modalDateSubtitle"></span>
+        </div>
+        <button id="btnModalClose" class="btn-close" aria-label="Close dialog">&times;</button>
+      </div>
+      <div class="dialog-body" id="modalMarkdownBody">
+        <div class="text-muted">Loading dossier...</div>
+      </div>
+    </div>
+  </dialog>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

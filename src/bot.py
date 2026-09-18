@@ -201,9 +201,20 @@ def main():
     # status command
     subparsers.add_parser("status", help="Show bot health and discovery status")
 
+    # ui / dashboard command
+    dashboard_parser = subparsers.add_parser("ui", aliases=["dashboard"], help="Launch local web UI dashboard")
+    dashboard_parser.add_argument("--port", type=int, default=5050, help="Port to listen on (default: 5050)")
+    dashboard_parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
+
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+
+    if args.command in ("ui", "dashboard"):
+        from src.dashboard.server import run_dashboard_server
+        run_dashboard_server(host=args.host, port=args.port, config_path=args.config)
+        return
+
     bot = NFTBot(cfg)
 
     if args.command == "inspect":

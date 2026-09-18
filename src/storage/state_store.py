@@ -194,3 +194,57 @@ class StateStore:
                 "checkpoints": checkpoints,
                 "telemetry": telemetry,
             }
+
+    def get_all_candidates_history(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Returns candidate history records ordered by creation date descending."""
+        with self._get_connection() as conn:
+            c = conn.cursor()
+            c.execute("""
+                SELECT slug, date_str, is_pass, reasons, created_at
+                FROM candidate_history
+                ORDER BY created_at DESC
+                LIMIT ?
+            """, (limit,))
+            rows = c.fetchall()
+            return [
+                {
+                    "slug": r[0],
+                    "date_str": r[1],
+                    "is_pass": bool(r[2]),
+                    "reasons": r[3],
+                    "created_at": r[4],
+                }
+                for r in rows
+            ]
+
+    def get_all_monitored_collections(self, search: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        """Returns monitored collections with optional search query."""
+        with self._get_connection() as conn:
+            c = conn.cursor()
+            if search:
+                pattern = f"%{search.strip().lower()}%"
+                c.execute("""
+                    SELECT slug, discovery_source, last_evaluated_at, evaluation_count, created_at
+                    FROM monitored_collections
+                    WHERE LOWER(slug) LIKE ?
+                    ORDER BY CASE WHEN last_evaluated_at IS NULL THEN 0 ELSE 1 END, last_evaluated_at DESC
+                    LIMIT ?
+                """, (pattern, limit))
+            else:
+                c.execute("""
+                    SELECT slug, discovery_source, last_evaluated_at, evaluation_count, created_at
+                    FROM monitored_collections
+                    ORDER BY CASE WHEN last_evaluated_at IS NULL THEN 0 ELSE 1 END, last_evaluated_at DESC
+                    LIMIT ?
+                """, (limit,))
+            rows = c.fetchall()
+            return [
+                {
+                    "slug": r[0],
+                    "discovery_source": r[1],
+                    "last_evaluated_at": r[2],
+                    "evaluation_count": r[3],
+                    "created_at": r[4],
+                }
+                for r in rows
+            ]

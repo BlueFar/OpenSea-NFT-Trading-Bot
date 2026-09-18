@@ -4,4 +4,6 @@ __pycache__/
 .env
 data/
 state/*.db
+state/*.pid
+*.log
 .pytest_cache/
