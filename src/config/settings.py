@@ -17,8 +17,10 @@ class DiscoveryConfig(BaseModel):
     primary_source: str = "collections"
     batch_size: int = 50
     max_pages_per_cycle: int = 2
-    enable_top: bool = True
-    enable_trending: bool = True
+    order_by: Optional[str] = "seven_day_volume"  # /api/v2/collections order_by; None = unordered catalog
+    max_depth_pages: int = 20  # Restart each chain's crawl from the top after this many pages (0 = unlimited)
+    enable_top: bool = False
+    enable_trending: bool = False
     chains: List[str] = Field(default_factory=lambda: ["ethereum", "base", "polygon"])
     watchlist: List[str] = Field(default_factory=list)
 
@@ -31,9 +33,14 @@ class FloorChangeFilterConfig(BaseModel):
     max_change_pct: float
 
 class OfferToFloorFilterConfig(BaseModel):
-    enabled: bool = False  # Kept disabled/advisory pending trading formula confirmation
+    enabled: bool = True
     min_ratio_pct: float = 40.0
-    formula: str = "modelled_entry_offer_to_floor"
+    # Options: floor_premium_over_effective_offer, floor_spread_to_entry_offer, modelled_entry_offer_to_floor
+    formula: str = "floor_premium_over_effective_offer"
+
+class NetProfitFilterConfig(BaseModel):
+    enabled: bool = True
+    min_net_roi_pct: float = 10.0
 
 class ListedItemsFilterConfig(BaseModel):
     max_listed_pct: float = 6.0
@@ -49,6 +56,7 @@ class FiltersConfig(BaseModel):
     floor_change_1d: FloorChangeFilterConfig = Field(default_factory=lambda: FloorChangeFilterConfig(max_change_pct=8.0))
     floor_change_7d: FloorChangeFilterConfig = Field(default_factory=lambda: FloorChangeFilterConfig(max_change_pct=10.0))
     offer_to_floor: OfferToFloorFilterConfig = Field(default_factory=OfferToFloorFilterConfig)
+    net_profit: NetProfitFilterConfig = Field(default_factory=NetProfitFilterConfig)
     listed_items: ListedItemsFilterConfig = Field(default_factory=ListedItemsFilterConfig)
     verification: VerificationFilterConfig = Field(default_factory=VerificationFilterConfig)
     project_age: ProjectAgeFilterConfig = Field(default_factory=ProjectAgeFilterConfig)
@@ -57,6 +65,14 @@ class TradeModelConfig(BaseModel):
     entry_offer_premium_pct: float = 1.0
     target_sale_discount_from_floor_pct: float = 5.0
     gas_estimate_eth: float = 0.005
+    # Used only when the OpenSea fee is not present in collection metadata. None = mark economics INCOMPLETE.
+    marketplace_fee_pct: Optional[float] = 1.0
+
+class FloorHistoryConfig(BaseModel):
+    snapshot_retention_days: int = 10
+    one_day_tolerance_hours: float = 6.0      # Accept a bot snapshot taken 24h +/- this
+    seven_day_tolerance_hours: float = 24.0   # Accept a bot snapshot taken 7d +/- this
+    use_provider_endpoint: bool = True        # Fall back to /collections/{slug}/floor_prices when no snapshot
 
 class SchedulerConfig(BaseModel):
     discovery_interval_seconds: int = 3600
@@ -64,6 +80,8 @@ class SchedulerConfig(BaseModel):
     request_delay_seconds: float = 0.5
     rate_limit_backoff_factor: float = 2.0
     max_retries: int = 5
+    evaluations_per_cycle: int = 10
+    shortlist_refresh_seconds: int = 3600  # Re-check collections that passed the cheap filters this often
 
 class BotConfig(BaseModel):
     general: GeneralConfig = Field(default_factory=GeneralConfig)
@@ -71,6 +89,7 @@ class BotConfig(BaseModel):
     filters: FiltersConfig = Field(default_factory=FiltersConfig)
     trade_model: TradeModelConfig = Field(default_factory=TradeModelConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
+    floor_history: FloorHistoryConfig = Field(default_factory=FloorHistoryConfig)
     opensea_api_key: Optional[str] = None
 
 def load_config(config_path: str = "config/config.yaml") -> BotConfig:

@@ -55,6 +55,59 @@ class StateStore:
                     created_at TIMESTAMP
                 )
             """)
+            # Bot-recorded floor price history (OpenSea v2 has no public floor time-series endpoint)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS floor_snapshots (
+                    slug TEXT,
+                    ts INTEGER,
+                    floor_price REAL,
+                    currency TEXT,
+                    PRIMARY KEY (slug, ts)
+                )
+            """)
+            # Columns added after the initial schema; migrate existing databases in place
+            self._add_column_if_missing(cursor, "monitored_collections", "shortlisted", "INTEGER DEFAULT 0")
+            self._add_column_if_missing(cursor, "candidate_history", "reject_filter", "TEXT")
+            conn.commit()
+
+    @staticmethod
+    def _add_column_if_missing(cursor: sqlite3.Cursor, table: str, column: str, decl: str):
+        cursor.execute(f"PRAGMA table_info({table})")
+        if column not in {row[1] for row in cursor.fetchall()}:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+    def record_floor_snapshot(self, slug: str, ts: int, floor_price: float, currency: str = "ETH", retention_days: int = 10):
+        """Stores the current floor price so 1-day / 7-day changes can be computed later."""
+        with self._get_connection() as conn:
+            c = conn.cursor()
+            c.execute("""
+                INSERT INTO floor_snapshots (slug, ts, floor_price, currency)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(slug, ts) DO UPDATE SET floor_price=excluded.floor_price, currency=excluded.currency
+            """, (slug, int(ts), float(floor_price), currency))
+            c.execute("DELETE FROM floor_snapshots WHERE slug=? AND ts < ?", (slug, int(ts) - retention_days * 86400))
+            conn.commit()
+
+    def get_floor_snapshot_near(self, slug: str, target_ts: int, tolerance_seconds: float) -> Optional[Dict[str, Any]]:
+        """Returns the snapshot closest to target_ts within +/- tolerance_seconds, or None."""
+        with self._get_connection() as conn:
+            c = conn.cursor()
+            c.execute("""
+                SELECT ts, floor_price, currency FROM floor_snapshots
+                WHERE slug=? AND ts BETWEEN ? AND ?
+                ORDER BY ABS(ts - ?) ASC
+                LIMIT 1
+            """, (slug, int(target_ts - tolerance_seconds), int(target_ts + tolerance_seconds), int(target_ts)))
+            row = c.fetchone()
+            if not row:
+                return None
+            return {"ts": row[0], "floor_price": row[1], "currency": row[2]}
+
+    def set_shortlisted(self, slug: str, shortlisted: bool):
+        """Marks whether a collection passed the cheap structural filters (age, verification, listings, frequency)."""
+        with self._get_connection() as conn:
+            c = conn.cursor()
+            c.execute("UPDATE monitored_collections SET shortlisted=? WHERE slug=?", (1 if shortlisted else 0, slug))
             conn.commit()
 
     def add_discovered_slugs(self, slugs: List[str], source: str = "discovery"):
@@ -72,22 +125,38 @@ class StateStore:
                 """, (s, source, now))
             conn.commit()
 
-    def get_collections_due_for_evaluation(self, limit: int = 20) -> List[str]:
+    def get_collections_due_for_evaluation(self, limit: int = 20, shortlist_refresh_seconds: Optional[float] = None) -> List[str]:
         """
-        Retrieves collection slugs due for evaluation:
-        Prioritizes collections never evaluated (NULL), then those evaluated longest ago.
+        Retrieves collection slugs due for evaluation.
+        If shortlist_refresh_seconds is given, up to half the slots go to shortlisted collections
+        not evaluated within that window, so their floor history keeps building.
+        The rest prioritizes collections never evaluated (NULL), then those evaluated longest ago.
         """
         with self._get_connection() as conn:
             c = conn.cursor()
-            c.execute("""
+            selected: List[str] = []
+            if shortlist_refresh_seconds is not None:
+                cutoff = datetime.fromtimestamp(
+                    datetime.now(timezone.utc).timestamp() - shortlist_refresh_seconds, tz=timezone.utc
+                ).isoformat()
+                c.execute("""
+                    SELECT slug FROM monitored_collections
+                    WHERE shortlisted=1 AND last_evaluated_at IS NOT NULL AND last_evaluated_at < ?
+                    ORDER BY last_evaluated_at ASC
+                    LIMIT ?
+                """, (cutoff, max(1, limit // 2)))
+                selected = [r[0] for r in c.fetchall()]
+
+            c.execute(f"""
                 SELECT slug FROM monitored_collections
+                WHERE slug NOT IN ({",".join("?" * len(selected))})
                 ORDER BY
                     CASE WHEN last_evaluated_at IS NULL THEN 0 ELSE 1 END,
                     last_evaluated_at ASC
                 LIMIT ?
-            """, (limit,))
-            rows = c.fetchall()
-            return [r[0] for r in rows]
+            """, (*selected, limit - len(selected)))
+            selected.extend(r[0] for r in c.fetchall())
+            return selected
 
     def mark_collection_evaluated(self, slug: str):
         """Updates last_evaluated_at and increments evaluation_count for a collection."""
@@ -136,20 +205,38 @@ class StateStore:
             c.execute("SELECT 1 FROM candidate_history WHERE slug=? AND date_str=? AND is_pass=1", (slug, date_str))
             return c.fetchone() is not None
 
-    def record_candidate(self, slug: str, date_str: str, is_pass: bool, reasons: str = ""):
-        """Records a candidate evaluation for the given calendar day."""
+    def record_candidate(self, slug: str, date_str: str, is_pass: bool, reasons: str = "", reject_filter: Optional[str] = None):
+        """
+        Records a candidate evaluation for the given calendar day.
+        A later failure on the same day never overwrites a recorded pass (its Info.md already exists).
+        """
         with self._get_connection() as conn:
             c = conn.cursor()
             now = datetime.now(timezone.utc).isoformat()
             c.execute("""
-                INSERT INTO candidate_history (slug, date_str, is_pass, reasons, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO candidate_history (slug, date_str, is_pass, reasons, created_at, reject_filter)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(slug, date_str) DO UPDATE SET
                     is_pass=excluded.is_pass,
                     reasons=excluded.reasons,
-                    created_at=excluded.created_at
-            """, (slug, date_str, 1 if is_pass else 0, reasons, now))
+                    created_at=excluded.created_at,
+                    reject_filter=excluded.reject_filter
+                WHERE candidate_history.is_pass = 0 OR excluded.is_pass = 1
+            """, (slug, date_str, 1 if is_pass else 0, reasons, now, None if is_pass else reject_filter))
             conn.commit()
+
+    def get_rejection_funnel(self, since_date_str: str) -> Dict[str, int]:
+        """Counts evaluations since the given date grouped by the filter that rejected them ('PASS' for passes)."""
+        with self._get_connection() as conn:
+            c = conn.cursor()
+            c.execute("""
+                SELECT CASE WHEN is_pass=1 THEN 'PASS' ELSE COALESCE(reject_filter, 'unknown') END AS k, COUNT(*)
+                FROM candidate_history
+                WHERE date_str >= ?
+                GROUP BY k
+                ORDER BY COUNT(*) DESC
+            """, (since_date_str,))
+            return {row[0]: row[1] for row in c.fetchall()}
 
     def update_telemetry(self, key: str, value: Any):
         """Updates a key-value telemetry item."""

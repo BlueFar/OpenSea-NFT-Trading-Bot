@@ -61,6 +61,7 @@ class CollectionDataProvider(ABC):
         cursor: Optional[str] = None,
         limit: int = 50,
         chain: Optional[str] = None,
+        order_by: Optional[str] = None,
     ) -> Tuple[List[str], Optional[str]]:
         """
         Discovers collection slugs via general collections endpoint.

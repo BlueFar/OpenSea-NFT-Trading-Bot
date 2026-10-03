@@ -5,12 +5,15 @@ general:
   log_level: "INFO"
 
 discovery:
-  # Primary source uses GET /api/v2/collections with persistent cursor checkpointing
+  # Primary source uses GET /api/v2/collections with persistent cursor checkpointing (one cursor per chain)
   primary_source: "collections"
   batch_size: 50
-  max_pages_per_cycle: 2            # Progressive crawl: advances N pages per discovery cycle
-  enable_top: true                  # Supplementary source: GET /api/v2/collections/top
-  enable_trending: true             # Supplementary source: GET /api/v2/collections/trending
+  max_pages_per_cycle: 2            # Progressive crawl: advances N pages per chain per discovery cycle
+  order_by: "seven_day_volume"      # Most-traded first. Options: seven_day_volume, created_date, one_day_change,
+                                    # seven_day_change, num_owners, market_cap. Remove for the unordered catalog.
+  max_depth_pages: 20               # Restart each chain's crawl from the top after N pages (0 = crawl to the end)
+  enable_top: false                 # Supplementary GET /api/v2/collections/top (not a documented v2 endpoint)
+  enable_trending: false            # Supplementary GET /api/v2/collections/trending (not a documented v2 endpoint)
   chains: ["ethereum", "base", "polygon"]
   watchlist: []                     # Optional explicit slugs to monitor
 
@@ -24,9 +27,15 @@ filters:
   floor_change_7d:
     max_change_pct: 10.0            # Requirement: < 10.0%
   offer_to_floor:
-    enabled: false                  # Advisory / observe-only pending trading formula confirmation
-    min_ratio_pct: 40.0
-    formula: "modelled_entry_offer_to_floor" # Options: modelled_entry_offer_to_floor, floor_spread_to_entry_offer
+    enabled: true
+    min_ratio_pct: 40.0             # "Floor above 40% of top offer, including royalty"
+    # floor_premium_over_effective_offer: floor is >= 40% above (entry offer + royalty on resale)
+    # floor_spread_to_entry_offer:        floor is >= 40% above entry offer (no royalty)
+    # modelled_entry_offer_to_floor:      entry offer is >= 40% of floor (original spec reading)
+    formula: "floor_premium_over_effective_offer"
+  net_profit:
+    enabled: true
+    min_net_roi_pct: 10.0           # Modelled net ROI after marketplace fee, royalty and gas
   listed_items:
     max_listed_pct: 6.0             # Requirement: < 6.0%
   verification:
@@ -35,14 +44,26 @@ filters:
     min_age_days: 60.0              # Requirement: > 60.0 days (OpenSea Collection Age)
 
 trade_model:
-  entry_offer_premium_pct: 1.0      # Model assumption: bid placed 1.0% above observed top offer
+  entry_offer_premium_pct: 1.0      # Model assumption: bid placed 1.0% above observed top collection offer
   target_sale_discount_from_floor_pct: 5.0 # Model assumption: exit discount below floor
   gas_estimate_eth: 0.005           # Model assumption: gas costs in ETH
-  # No fallback marketplace fee: fee must be determined reliably from API, else marked UNKNOWN
+  # Used only when collection metadata does not list the OpenSea fee; labelled CONFIGURED in Info.md.
+  # Set this to OpenSea's current marketplace fee. Remove (null) to mark such collections INCOMPLETE instead.
+  marketplace_fee_pct: 1.0
+
+floor_history:
+  # OpenSea v2 has no documented floor time-series endpoint, so the bot records its own floor snapshots.
+  # 1-day / 7-day checks start passing once snapshots from ~24h / ~7d ago exist.
+  snapshot_retention_days: 10
+  one_day_tolerance_hours: 6.0
+  seven_day_tolerance_hours: 24.0
+  use_provider_endpoint: true       # Also try /collections/{slug}/floor_prices when no snapshot exists
 
 scheduler:
   discovery_interval_seconds: 3600  # Progressive catalog crawl cadence
   candidate_refresh_interval_seconds: 300 # Market data evaluation / refresh cadence
+  evaluations_per_cycle: 10         # Collections evaluated per refresh cycle
+  shortlist_refresh_seconds: 3600   # Collections passing age/verified/listings/frequency are re-checked this often
   request_delay_seconds: 0.5        # Polite spacing between API calls
   rate_limit_backoff_factor: 2.0
   max_retries: 5

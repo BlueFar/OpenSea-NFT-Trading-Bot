@@ -41,7 +41,7 @@ def test_full_evaluation_passing_collection_creates_info_md():
         curr_floor, points_1d, points_7d = make_sample_floor_history(1.5, pct_change_1d=2.0, pct_change_7d=3.0)
         mock_provider.get_collection_stats.return_value = CollectionStats(floor_price=curr_floor, floor_price_symbol="ETH")
         mock_provider.get_floor_price_history.side_effect = lambda slug, timeframe: points_1d if timeframe == "one_day" else points_7d
-        mock_provider.get_top_offer.return_value = Offer(order_hash="0xoff", chain="ethereum", price_value=1.0, price_currency="WETH")
+        mock_provider.get_top_offer.return_value = Offer(order_hash="0xoff", chain="ethereum", price_value=0.9, price_currency="WETH")
 
         evaluator = CollectionEvaluator(mock_provider, state_store, config)
 

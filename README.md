@@ -33,8 +33,9 @@ This bot represents **Stage 1 (BOT)** in a two-stage pipeline:
 
 ## 2. Monitored Universe & Progressive Discovery
 
-- **Primary Source**: `GET /api/v2/collections` with persistent cursor checkpointing in SQLite (`state/bot.db`). The bot progressively crawls catalog pages without biasing toward high-volume collections.
-- **Supplementary Sources**: `GET /api/v2/collections/top`, `GET /api/v2/collections/trending`, and a custom `watchlist` in `config/config.yaml`.
+- **Primary Source**: `GET /api/v2/collections?chain=<chain>&order_by=seven_day_volume`, one persistent cursor per configured chain in SQLite (`state/bot.db`). Each chain's crawl restarts from the top after `max_depth_pages`, so the most-traded collections keep being rediscovered instead of the crawl drifting into the long tail of unverified collections.
+- **Shortlist Refresh**: Collections that pass the cheap structural filters (age, verification, listings, trading frequency) are re-evaluated every `shortlist_refresh_seconds` (default hourly), which also builds their floor history.
+- **Supplementary Sources**: a custom `watchlist` in `config/config.yaml`. `GET /api/v2/collections/top` and `/trending` are off by default because they are not documented v2 endpoints.
 - **Batch Optimization**: Uses `POST /api/v2/collections/batch` to fetch metadata for multiple collections in single requests where applicable.
 
 ---
@@ -46,23 +47,32 @@ All filters are centrally configured in `config/config.yaml`:
 | # | Filter | Threshold | Evaluation Metric | Details |
 |---|--------|-----------|-------------------|---------|
 | 1 | **Trading Frequency** | $\le 2.0$ trades/day | `average_daily_sales` (default) | Grouped across **7 complete calendar days** in local timezone (`Asia/Kolkata`). Deduplicates sales by transaction/order hash. Tracks both transaction count and items sold. |
-| 2 | **1-Day Floor Price Change** | $< 8.0\%$ | `abs((current - floor_24h_ago) / floor_24h_ago) * 100` | Evaluated against OpenSea time-series floor history (`timeframe=one_day`). |
-| 3 | **7-Day Floor Price Change** | $< 10.0\%$ | `abs((current - floor_7d_ago) / floor_7d_ago) * 100` | Evaluated against OpenSea time-series floor history (`timeframe=seven_days`). |
-| 4 | **Top Offer vs Floor** | Advisory ($\ge 40\%$) | Configurable | Flagged as advisory/observe-only by default pending final trading strategy formula confirmation. |
-| 5 | **Listed Items** | $< 6.0\%$ | `(listed_items / total_supply) * 100` | **Early-exit optimization**: paginator aborts immediately if active listings exceed the threshold. |
+| 2 | **1-Day Floor Price Change** | $< 8.0\%$ | `abs((current - floor_24h_ago) / floor_24h_ago) * 100` | Reference floor comes from the bot's own floor snapshots (see below). |
+| 3 | **7-Day Floor Price Change** | $< 10.0\%$ | `abs((current - floor_7d_ago) / floor_7d_ago) * 100` | Reference floor comes from the bot's own floor snapshots (see below). |
+| 4 | **Floor vs Top Offer Spread** | $\ge 40\%$ | `(floor - effective_entry_cost) / effective_entry_cost * 100` | "Floor above 40% of top offer, including royalty". `effective_entry_cost` = top collection offer + 1% premium + creator royalty owed on resale. Other formulas selectable via `filters.offer_to_floor.formula`. |
+| 5 | **Listed Items** | $< 6.0\%$ | `(unique_listed_nfts / total_supply) * 100` | Several listings of the same NFT count once. **Early-exit optimization**: paginator aborts immediately if active listings exceed the threshold. |
 | 6 | **OpenSea Verification** | Blue Checkmark | `safelist_status in ["verified"]` | Specifically requires `verified` (blue tick); rejects `approved` or unverified collections. |
 | 7 | **OpenSea Collection Age**| $> 60.0$ days | `(detection_date - created_date).days` | OpenSea collection age calculated from `created_date`. |
+| 8 | **Minimum Net Profit** | $\ge 10\%$ net ROI | `net_profit / entry_offer * 100` | After marketplace fee, creator royalty and gas. Fails closed when the trade model is incomplete. |
+
+### Floor history
+
+OpenSea v2 has no documented floor-price time-series endpoint, so every evaluation stores the current floor (from `/collections/{slug}/stats`) in the `floor_snapshots` table. The 1-day check uses the snapshot nearest to 24h ago (±6h) and the 7-day check the snapshot nearest to 7 days ago (±24h). Until those exist, collections are rejected as `floor_history_1d` / `floor_history_7d`, so **a freshly started bot cannot produce candidates for about 7 days**. Keep `state/bot.db` between restarts.
+
+### Rejection funnel
+
+Every evaluation records which filter rejected the collection. `python -m bot status` prints the counts for the last 7 days, which shows which rule is the bottleneck.
 
 ---
 
 ## 4. Theoretical Trade Economics Model
 
 The bot computes hypothetical entry-and-exit trade economics while clearly distinguishing:
-- **Observed Market Data**: Current floor price, observed top offer, creator royalty fee %, OpenSea marketplace fee %.
+- **Observed Market Data**: Current floor price, highest collection-wide offer (per NFT; item and trait offers are ignored), creator royalty fee %, OpenSea marketplace fee % (from collection metadata, or `trade_model.marketplace_fee_pct` labelled CONFIGURED when metadata does not list it).
 - **Model Assumptions**: Modelled entry offer premium (+1.0%), target exit discount below floor (-5.0%), estimated gas cost (0.005 ETH).
 - **Modelled Results**: Modelled entry offer, target exit price, gross spread, separate marketplace & creator fees, net profit, ROI, and profit margin.
 
-> **Note**: If the applicable marketplace fee schedule cannot be determined reliably from the collection metadata, the model is explicitly marked as `INCOMPLETE / UNKNOWN` rather than assuming a fallback fee.
+> **Note**: If the OpenSea fee is not in the collection metadata, the configured `trade_model.marketplace_fee_pct` is used and labelled `CONFIGURED` in Info.md. Set it to `null` to mark such collections `INCOMPLETE / UNKNOWN` instead (they then fail the net-profit filter).
 
 ---
 

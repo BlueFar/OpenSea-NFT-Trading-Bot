@@ -1,11 +1,11 @@
 import math
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
 from ..providers.base import CollectionDataProvider
-from ..models.collection import CollectionMetadata
+from ..models.collection import CollectionMetadata, FloorPricePoint
 from ..models.metrics import ListingMetrics, SalesMetrics, FloorPriceMetrics
 from ..models.trade import TradeEconomics
-from ..models.filters import FilterEvaluationReport, DataQualityState
+from ..models.filters import FilterEvaluationReport, FilterResultStatus, DataQualityState
 from ..metrics.calculator import (
     compute_sales_metrics,
     compute_floor_metrics,
@@ -44,6 +44,32 @@ class CollectionEvaluator:
         self.config = config
         self.filter_engine = FilterEngine(config.filters)
 
+    def _reject_early(self, slug: str, date_str: str, filter_name: str, reason: str) -> None:
+        """Records an early-exit rejection so the status funnel shows which filter is the bottleneck."""
+        self.state_store.record_candidate(
+            slug, date_str, is_pass=False, reasons=f"{filter_name}: {reason}", reject_filter=filter_name
+        )
+        if filter_name in ("project_age", "verification", "total_supply", "listed_items", "trading_frequency"):
+            self.state_store.set_shortlisted(slug, False)
+
+    def _floor_reference_points(self, slug: str, now_ts: int, timeframe: str) -> List[FloorPricePoint]:
+        """
+        Returns the historical floor reference for the timeframe.
+        Uses the bot's own snapshots first; falls back to the provider endpoint if configured.
+        """
+        fh = self.config.floor_history
+        if timeframe == "one_day":
+            target, tol = now_ts - 86400, fh.one_day_tolerance_hours * 3600
+        else:
+            target, tol = now_ts - 7 * 86400, fh.seven_day_tolerance_hours * 3600
+
+        snap = self.state_store.get_floor_snapshot_near(slug, target, tol)
+        if snap:
+            return [FloorPricePoint(time=snap["ts"], token_unit=snap["floor_price"], symbol=snap["currency"])]
+        if fh.use_provider_endpoint:
+            return self.provider.get_floor_price_history(slug, timeframe=timeframe)
+        return []
+
     def evaluate_collection(
         self,
         slug: str,
@@ -67,12 +93,15 @@ class CollectionEvaluator:
         collection = self.provider.get_collection(slug)
         if not collection:
             logger.warning("[%s] Rejected: Collection details could not be retrieved.", slug)
+            if stop_on_first_failure:
+                self._reject_early(slug, date_str, "collection_fetch", "collection details could not be retrieved")
             return None
 
         # Early check: Project Age
         if not collection.created_date:
             logger.info("[%s] Rejected: OpenSea created_date is missing.", slug)
             if stop_on_first_failure:
+                self._reject_early(slug, date_str, "project_age", "created_date missing")
                 return None
         else:
             try:
@@ -81,10 +110,12 @@ class CollectionEvaluator:
                 if age_days <= self.config.filters.project_age.min_age_days:
                     logger.info("[%s] Rejected: OpenSea Collection Age = %.1f days (<= %.1f)", slug, age_days, self.config.filters.project_age.min_age_days)
                     if stop_on_first_failure:
+                        self._reject_early(slug, date_str, "project_age", f"{age_days:.1f} days")
                         return None
             except Exception as e:
                 logger.warning("[%s] Could not parse created_date '%s': %s", slug, collection.created_date, e)
                 if stop_on_first_failure:
+                    self._reject_early(slug, date_str, "project_age", f"unparseable created_date '{collection.created_date}'")
                     return None
 
         # Early check: Verification Status
@@ -92,6 +123,7 @@ class CollectionEvaluator:
         if actual_status not in self.config.filters.verification.required_status:
             logger.info("[%s] Rejected: Verification status is '%s' (required: %s)", slug, actual_status, self.config.filters.verification.required_status)
             if stop_on_first_failure:
+                self._reject_early(slug, date_str, "verification", f"status '{actual_status}'")
                 return None
 
         # Early check: Total Supply
@@ -99,12 +131,16 @@ class CollectionEvaluator:
         if total_supply is None or total_supply <= 0:
             logger.info("[%s] Rejected: Total supply is %s (must be > 0)", slug, total_supply)
             if stop_on_first_failure:
+                self._reject_early(slug, date_str, "total_supply", f"total supply {total_supply}")
                 return None
 
         # -------------------------------------------------------------
         # STEP 2: Active Listings (With Early-Exit Pagination Optimization)
         # -------------------------------------------------------------
-        max_allowed_listings = math.floor(total_supply * (self.config.filters.listed_items.max_listed_pct / 100.0))
+        max_allowed_listings = (
+            math.floor(total_supply * (self.config.filters.listed_items.max_listed_pct / 100.0))
+            if total_supply else None
+        )
         listed_count, is_early_exit = self.provider.get_active_listings_count(
             slug=slug,
             early_exit_threshold=max_allowed_listings,
@@ -113,6 +149,7 @@ class CollectionEvaluator:
         if listed_count is None:
             logger.warning("[%s] Failed to retrieve active listings count from API. Rejecting (fails closed).", slug)
             if stop_on_first_failure:
+                self._reject_early(slug, date_str, "listed_items", "listings API failed")
                 return None
 
         listing_metrics = compute_listing_metrics(
@@ -125,6 +162,7 @@ class CollectionEvaluator:
             pct_display = f"{listing_metrics.listed_percentage:.2f}%" if listing_metrics.listed_percentage else "exceeded"
             logger.info("[%s] Rejected: Listed percentage %s (>= %.2f%%)", slug, pct_display, self.config.filters.listed_items.max_listed_pct)
             if stop_on_first_failure:
+                self._reject_early(slug, date_str, "listed_items", f"listed {pct_display}")
                 return None
 
         # -------------------------------------------------------------
@@ -148,6 +186,7 @@ class CollectionEvaluator:
                 data_quality=DataQualityState.ERROR,
             )
             if stop_on_first_failure:
+                self._reject_early(slug, date_str, "trading_frequency", "sale events API failed")
                 return None
         else:
             sales_metrics = compute_sales_metrics(
@@ -176,7 +215,12 @@ class CollectionEvaluator:
                 slug, eval_trades_val, cfg_tf.sale_count_mode, cfg_tf.max_threshold
             )
             if stop_on_first_failure:
+                self._reject_early(slug, date_str, "trading_frequency", f"{eval_trades_val:.2f} {cfg_tf.sale_count_mode}/day")
                 return None
+
+        # Passed the cheap structural filters: re-check hourly so floor history keeps building
+        if stop_on_first_failure:
+            self.state_store.set_shortlisted(slug, True)
 
         # -------------------------------------------------------------
         # STEP 4: Floor Prices & Historical Changes
@@ -185,8 +229,14 @@ class CollectionEvaluator:
         current_floor = stats.floor_price if stats else None
         floor_currency = stats.floor_price_symbol if stats else "ETH"
 
-        floor_points_1d = self.provider.get_floor_price_history(slug, timeframe="one_day")
-        floor_points_7d = self.provider.get_floor_price_history(slug, timeframe="seven_days")
+        now_ts = int(dt_utc.timestamp())
+        floor_points_1d = self._floor_reference_points(slug, now_ts, "one_day")
+        floor_points_7d = self._floor_reference_points(slug, now_ts, "seven_days")
+        if current_floor is not None and current_floor > 0:
+            self.state_store.record_floor_snapshot(
+                slug, now_ts, current_floor, floor_currency,
+                retention_days=self.config.floor_history.snapshot_retention_days,
+            )
 
         floor_metrics = compute_floor_metrics(
             current_floor=current_floor,
@@ -195,17 +245,26 @@ class CollectionEvaluator:
             currency=floor_currency,
         )
 
-        if floor_metrics.change_1d_abs_pct is None or floor_metrics.change_1d_abs_pct >= self.config.filters.floor_change_1d.max_change_pct:
-            chg_str = f"{floor_metrics.change_1d_abs_pct:.2f}%" if floor_metrics.change_1d_abs_pct is not None else "UNKNOWN"
-            logger.info("[%s] Rejected: 1-Day floor change %s (>= %.2f%%)", slug, chg_str, self.config.filters.floor_change_1d.max_change_pct)
+        if current_floor is None:
+            logger.info("[%s] Rejected: current floor price unavailable.", slug)
             if stop_on_first_failure:
+                self._reject_early(slug, date_str, "floor_price", "current floor unavailable")
                 return None
 
-        if floor_metrics.change_7d_abs_pct is None or floor_metrics.change_7d_abs_pct >= self.config.filters.floor_change_7d.max_change_pct:
-            chg_str = f"{floor_metrics.change_7d_abs_pct:.2f}%" if floor_metrics.change_7d_abs_pct is not None else "UNKNOWN"
-            logger.info("[%s] Rejected: 7-Day floor change %s (>= %.2f%%)", slug, chg_str, self.config.filters.floor_change_7d.max_change_pct)
-            if stop_on_first_failure:
-                return None
+        for label, change, max_pct in (
+            ("1d", floor_metrics.change_1d_abs_pct, self.config.filters.floor_change_1d.max_change_pct),
+            ("7d", floor_metrics.change_7d_abs_pct, self.config.filters.floor_change_7d.max_change_pct),
+        ):
+            if change is None:
+                logger.info("[%s] Rejected: no floor reference from %s ago yet (bot floor history still building).", slug, label)
+                if stop_on_first_failure:
+                    self._reject_early(slug, date_str, f"floor_history_{label}", f"no floor snapshot from {label} ago yet")
+                    return None
+            elif change >= max_pct:
+                logger.info("[%s] Rejected: %s floor change %.2f%% (>= %.2f%%)", slug, label, change, max_pct)
+                if stop_on_first_failure:
+                    self._reject_early(slug, date_str, f"floor_change_{label}", f"{change:.2f}%")
+                    return None
 
         # -------------------------------------------------------------
         # STEP 5: Top Offer & Trade Economics
@@ -223,6 +282,7 @@ class CollectionEvaluator:
             entry_offer_premium_pct=self.config.trade_model.entry_offer_premium_pct,
             target_sale_discount_from_floor_pct=self.config.trade_model.target_sale_discount_from_floor_pct,
             gas_estimate_eth=self.config.trade_model.gas_estimate_eth,
+            fallback_marketplace_fee_pct=self.config.trade_model.marketplace_fee_pct,
         )
 
         # -------------------------------------------------------------
@@ -239,7 +299,16 @@ class CollectionEvaluator:
 
         if not report.is_overall_pass:
             logger.info("[%s] Filter Evaluation: FAIL. Reasons: %s", slug, "; ".join(report.rejection_reasons))
-            self.state_store.record_candidate(slug, date_str, is_pass=False, reasons="; ".join(report.rejection_reasons))
+            first_failed = next(
+                (name for name, c in report.criteria.items()
+                 if c.result in (FilterResultStatus.FAIL, FilterResultStatus.DATA_INSUFFICIENT)),
+                None,
+            )
+            self.state_store.record_candidate(
+                slug, date_str, is_pass=False,
+                reasons="; ".join(report.rejection_reasons),
+                reject_filter=first_failed,
+            )
             return report
 
         logger.info("[%s] ALL DETERMINISTIC FILTERS PASSED! (Candidate detected for %s)", slug, date_str)

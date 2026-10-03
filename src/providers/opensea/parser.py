@@ -10,6 +10,9 @@ from ...models.collection import (
     Offer,
 )
 
+# Seaport item types: 2 = ERC721, 3 = ERC1155, 4 = ERC721 with criteria, 5 = ERC1155 with criteria
+NFT_ITEM_TYPES = (2, 3, 4, 5)
+
 def parse_collection_metadata(data: Dict[str, Any]) -> CollectionMetadata:
     """Parses OpenSea collection details JSON response."""
     slug = data.get("collection") or data.get("slug") or ""
@@ -200,6 +203,13 @@ def parse_listings(data: Dict[str, Any]) -> Tuple[List[Listing], Optional[str]]:
             except (ValueError, TypeError):
                 pass
 
+        # Identify the listed token so several listings of one NFT count once
+        token_key = None
+        offer_items = ((item.get("protocol_data") or {}).get("parameters") or {}).get("offer") or []
+        nft_items = [o for o in offer_items if isinstance(o, dict) and o.get("itemType") in NFT_ITEM_TYPES]
+        if nft_items:
+            token_key = f"{str(nft_items[0].get('token', '')).lower()}:{nft_items[0].get('identifierOrCriteria')}"
+
         listings.append(Listing(
             order_hash=order_hash,
             chain=chain,
@@ -208,6 +218,7 @@ def parse_listings(data: Dict[str, Any]) -> Tuple[List[Listing], Optional[str]]:
             status=status,
             remaining_quantity=remaining_qty,
             order_created_at=item.get("order_created_at"),
+            token_key=token_key,
         ))
 
     return listings, next_cursor
@@ -235,6 +246,18 @@ def parse_offers(data: Dict[str, Any]) -> Tuple[List[Offer], Optional[str]]:
                 price_val = float(price_obj["value"]) / (10 ** decimals)
             except (ValueError, TypeError):
                 pass
+
+        # A collection offer for N items quotes the total price; convert to price per NFT
+        consideration = ((item.get("protocol_data") or {}).get("parameters") or {}).get("consideration") or []
+        nft_qty = 1
+        for cons in consideration:
+            if isinstance(cons, dict) and cons.get("itemType") in NFT_ITEM_TYPES:
+                try:
+                    nft_qty = max(1, int(cons.get("startAmount", 1)))
+                except (ValueError, TypeError):
+                    nft_qty = 1
+                break
+        price_val = price_val / nft_qty
 
         currency = price_obj.get("currency", "WETH")
         remaining_qty = 1

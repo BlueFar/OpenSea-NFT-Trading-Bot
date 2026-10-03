@@ -164,6 +164,7 @@ class OpenSeaProvider(CollectionDataProvider):
         Returns (accumulated_count, is_early_exit_exceeded).
         If API fails, returns (None, False) rather than assuming zero listings.
         """
+        listed_keys = set()  # Unique listed NFTs; one NFT listed twice counts once
         total_count = 0
         next_cursor = None
         seen_cursors = set()
@@ -186,7 +187,9 @@ class OpenSeaProvider(CollectionDataProvider):
                 break
 
             listings, next_cursor = parse_listings(data)
-            total_count += len(listings)
+            for lst in listings:
+                listed_keys.add(lst.token_key or lst.order_hash)
+            total_count = len(listed_keys)
 
             # Early-exit optimization
             if early_exit_threshold is not None and total_count > early_exit_threshold:
@@ -202,12 +205,29 @@ class OpenSeaProvider(CollectionDataProvider):
         return total_count, False
 
     def get_top_offer(self, slug: str) -> Optional[Offer]:
-        """Fetches the highest active offer for a collection."""
-        data = self.client.get(f"/api/v2/offers/collection/{slug}/all", params={"limit": 50})
-        if not data:
-            return None
+        """
+        Fetches the highest active collection offer (per NFT) for a collection.
+        Uses collection-wide offers only: item and trait offers on single rare NFTs
+        are not a price you can bid against for an arbitrary floor item.
+        """
+        offers: List[Offer] = []
+        next_cursor = None
+        seen_cursors = set()
+        for _ in range(5):
+            params: Dict[str, Any] = {"limit": 100}
+            if next_cursor:
+                if next_cursor in seen_cursors:
+                    break
+                seen_cursors.add(next_cursor)
+                params["next"] = next_cursor
+            data = self.client.get(f"/api/v2/offers/collection/{slug}", params=params)
+            if not data:
+                break
+            page, next_cursor = parse_offers(data)
+            offers.extend(page)
+            if not next_cursor:
+                break
 
-        offers, _ = parse_offers(data)
         if not offers:
             return None
 
@@ -220,6 +240,7 @@ class OpenSeaProvider(CollectionDataProvider):
         cursor: Optional[str] = None,
         limit: int = 50,
         chain: Optional[str] = None,
+        order_by: Optional[str] = None,
     ) -> Tuple[List[str], Optional[str]]:
         """Queries general /api/v2/collections endpoint."""
         params: Dict[str, Any] = {"limit": limit}
@@ -227,6 +248,8 @@ class OpenSeaProvider(CollectionDataProvider):
             params["next"] = cursor
         if chain:
             params["chain"] = chain
+        if order_by:
+            params["order_by"] = order_by
 
         data = self.client.get("/api/v2/collections", params=params)
         if not data:

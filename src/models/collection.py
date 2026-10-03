@@ -84,6 +84,7 @@ class Listing:
     status: str = "ACTIVE"
     remaining_quantity: int = 1
     order_created_at: Optional[int] = None
+    token_key: Optional[str] = None  # "<contract>:<token_id>" when available, to count unique listed NFTs
 
 @dataclass
 class Offer:

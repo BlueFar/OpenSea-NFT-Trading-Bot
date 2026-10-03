@@ -274,7 +274,8 @@ function renderCriteriaGrid(criteria) {
     trading_frequency: '4. Trading Frequency (7d)',
     floor_change_1d: '5. Floor Price Change (1D)',
     floor_change_7d: '6. Floor Price Change (7D)',
-    offer_to_floor: '7. Offer to Floor (Advisory)',
+    offer_to_floor: '7. Floor vs Top Offer Spread',
+    net_profit: '8. Minimum Net Profit',
   };
 
   el.criteriaGrid.innerHTML = Object.entries(criteria).map(([key, item]) => {

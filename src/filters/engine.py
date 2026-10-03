@@ -60,6 +60,9 @@ class FilterEngine:
         offer_criterion = self._eval_offer_to_floor(trade_economics, now_iso)
         report.add_criterion(offer_criterion)
 
+        # 8. Minimum Net Profit (modelled ROI after fees, royalty and gas)
+        report.add_criterion(self._eval_net_profit(trade_economics, now_iso))
+
         # Determine overall pass/fail
         # Must pass all blocking criteria (PASS or OBSERVE). Any FAIL or DATA_INSUFFICIENT fails the candidate.
         blocking_results = [
@@ -327,13 +330,34 @@ class FilterEngine:
             notes=f"Signed change: {signed_7d_str}, Absolute: {abs_7d_str}.",
         )
 
+    OFFER_TO_FLOOR_FORMULAS = {
+        "floor_premium_over_effective_offer": (
+            "floor_premium_over_effective_offer_pct",
+            "(current_floor - effective_entry_cost) / effective_entry_cost * 100, "
+            "effective_entry_cost = modelled_entry_offer + royalty on target exit price",
+            "Floor is {v:.2f}% above the modelled entry offer including royalty.",
+        ),
+        "floor_spread_to_entry_offer": (
+            "floor_spread_to_entry_offer_pct",
+            "(current_floor - modelled_entry_offer) / modelled_entry_offer * 100",
+            "Floor is {v:.2f}% above the modelled entry offer.",
+        ),
+        "modelled_entry_offer_to_floor": (
+            "entry_offer_to_floor_ratio_pct",
+            "modelled_entry_offer / current_floor * 100",
+            "Modelled entry offer is {v:.2f}% of floor.",
+        ),
+    }
+
     def _eval_offer_to_floor(self, trade_economics: TradeEconomics, now_iso: str) -> FilterCriterionResult:
         cfg = self.config.offer_to_floor
         threshold = f">= {cfg.min_ratio_pct:.2f}%" if cfg.enabled else "ADVISORY / OBSERVE ONLY"
-        formula = "modelled_entry_offer / current_floor * 100"
-        source = "GET /api/v2/offers/collection/{slug}/all & floor"
+        if cfg.formula not in self.OFFER_TO_FLOOR_FORMULAS:
+            raise ValueError(f"Unknown offer_to_floor formula '{cfg.formula}'")
+        field_name, formula, note_tmpl = self.OFFER_TO_FLOOR_FORMULAS[cfg.formula]
+        source = "GET /api/v2/offers/collection/{slug} (collection offers) & stats floor"
 
-        ratio = trade_economics.modelled.entry_offer_to_floor_ratio_pct
+        ratio = getattr(trade_economics.modelled, field_name)
         actual_val_str = f"{ratio:.2f}" if ratio is not None else "UNKNOWN"
 
         if not cfg.enabled:
@@ -375,5 +399,55 @@ class FilterEngine:
             data_quality=DataQualityState.AVAILABLE,
             timestamp=now_iso,
             source=source,
-            notes=f"Modelled entry offer is {ratio:.2f}% of floor.",
+            notes=note_tmpl.format(v=ratio),
+        )
+
+    def _eval_net_profit(self, trade_economics: TradeEconomics, now_iso: str) -> FilterCriterionResult:
+        cfg = self.config.net_profit
+        threshold = f">= {cfg.min_net_roi_pct:.2f}% net ROI" if cfg.enabled else "ADVISORY / OBSERVE ONLY"
+        formula = "(target_exit - entry_offer - marketplace_fee - royalty - gas) / entry_offer * 100"
+        source = "Trade model (collection offers, floor, fees)"
+        mod = trade_economics.modelled
+        roi = mod.estimated_roi_pct if mod.is_complete_and_reliable else None
+
+        if not cfg.enabled:
+            return FilterCriterionResult(
+                name="net_profit",
+                threshold=threshold,
+                actual_value=round(roi, 2) if roi is not None else "UNKNOWN",
+                unit="%",
+                formula=formula,
+                result=FilterResultStatus.OBSERVE,
+                data_quality=DataQualityState.AVAILABLE if roi is not None else DataQualityState.MISSING,
+                timestamp=now_iso,
+                source=source,
+                notes="Advisory ROI recorded; not blocking candidate decision.",
+            )
+
+        if roi is None:
+            return FilterCriterionResult(
+                name="net_profit",
+                threshold=threshold,
+                actual_value="UNKNOWN",
+                unit="%",
+                formula=formula,
+                result=FilterResultStatus.DATA_INSUFFICIENT,
+                data_quality=DataQualityState.MISSING,
+                timestamp=now_iso,
+                source=source,
+                notes=f"Trade model incomplete: {mod.status_note}",
+            )
+
+        is_pass = roi >= cfg.min_net_roi_pct
+        return FilterCriterionResult(
+            name="net_profit",
+            threshold=threshold,
+            actual_value=round(roi, 2),
+            unit="%",
+            formula=formula,
+            result=FilterResultStatus.PASS if is_pass else FilterResultStatus.FAIL,
+            data_quality=DataQualityState.AVAILABLE,
+            timestamp=now_iso,
+            source=source,
+            notes=f"Estimated net profit {mod.estimated_net_profit:.4f} {trade_economics.currency} on entry {mod.modelled_entry_offer:.4f}.",
         )

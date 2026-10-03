@@ -27,6 +27,7 @@ def test_discovery_progressive_checkpointing():
             enable_top=True,
             enable_trending=True,
             watchlist=["slug_watch"],
+            chains=[],
         )
 
         discovery = DiscoveryEngine(mock_provider, state_store, config)

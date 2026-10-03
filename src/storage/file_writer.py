@@ -88,6 +88,8 @@ def render_info_md(
     # Ratios
     offer_to_floor_ratio_str = f"{mod.entry_offer_to_floor_ratio_pct:.2f}%" if mod.entry_offer_to_floor_ratio_pct is not None else "UNKNOWN"
     floor_spread_ratio_str = f"{mod.floor_spread_to_entry_offer_pct:.2f}%" if mod.floor_spread_to_entry_offer_pct is not None else "UNKNOWN"
+    effective_cost_str = f"{mod.effective_entry_cost:.4f} {trade_economics.currency}" if mod.effective_entry_cost is not None else "UNKNOWN"
+    floor_premium_str = f"{mod.floor_premium_over_effective_offer_pct:.2f}%" if mod.floor_premium_over_effective_offer_pct is not None else "UNKNOWN"
 
     # Trade Economics modelled values
     modelled_entry_str = f"{mod.modelled_entry_offer:.4f} {trade_economics.currency}" if mod.modelled_entry_offer is not None else "UNKNOWN"
@@ -189,6 +191,8 @@ def render_info_md(
 - **OpenSea Marketplace Fee**: {mp_fee_pct_str}
 - **Modelled Entry Offer / Floor Ratio**: {offer_to_floor_ratio_str}
 - **Floor / Modelled Entry Offer Spread**: {floor_spread_ratio_str}
+- **Effective Entry Cost Including Royalty**: {effective_cost_str}
+- **Floor Premium Over Effective Entry Cost**: {floor_premium_str}
 
 ## Trade Economics
 
@@ -199,7 +203,7 @@ def render_info_md(
 - **Current Floor**: {curr_floor_str}
 - **Marketplace Fee (from OpenSea API)**: {mp_fee_pct_str}
 - **Creator Royalty (from OpenSea API)**: {royalty_pct_str}
-- **Fee Data Reliability**: {'RELIABLE' if obs.fees_reliable else 'INCOMPLETE / UNKNOWN (applicable OpenSea marketplace fee not confirmed)'}
+- **Fee Data Reliability**: {'INCOMPLETE / UNKNOWN (applicable OpenSea marketplace fee not confirmed)' if not obs.fees_reliable else ('CONFIGURED (OpenSea fee not in collection metadata; using trade_model.marketplace_fee_pct)' if obs.marketplace_fee_source == 'CONFIG' else 'RELIABLE (from OpenSea API)')}
 
 ### B. Model Assumptions (Configured Trading Strategy Parameters)
 - **[ASSUMPTION] Entry-Offer Premium**: +{asm.entry_offer_premium_pct:.1f}% above observed top offer

@@ -135,7 +135,7 @@ def test_dashboard_api_inspect():
         curr_floor, p1, p7 = make_sample_floor_history(1.25, 2.0, 3.0)
         mock_provider.get_collection_stats.return_value = CollectionStats(floor_price=curr_floor)
         mock_provider.get_floor_price_history.side_effect = lambda slug, timeframe="one_day": p1 if timeframe == "one_day" else p7
-        mock_provider.get_top_offer.return_value = Offer(order_hash="0x1", chain="ethereum", price_value=1.1, price_currency="WETH")
+        mock_provider.get_top_offer.return_value = Offer(order_hash="0x1", chain="ethereum", price_value=0.8, price_currency="WETH")
 
         evaluator = CollectionEvaluator(mock_provider, store, cfg)
 
@@ -147,7 +147,7 @@ def test_dashboard_api_inspect():
         assert data["slug"] == "solitary-voyagers"
         assert data["evaluated"] is True
         assert data["is_overall_pass"] is True
-        assert len(data["criteria"]) == 7
+        assert len(data["criteria"]) == 8
         assert "project_age" in data["criteria"]
         assert "trading_frequency" in data["criteria"]
         assert "listed_items" in data["criteria"]

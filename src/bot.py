@@ -20,6 +20,8 @@ from .providers.opensea.provider import OpenSeaProvider
 from .discovery.engine import DiscoveryEngine
 from .collectors.orchestrator import CollectionEvaluator
 from .utils.logging import setup_logger
+from .utils.time import now_local
+from datetime import timedelta
 
 logger = setup_logger("bot_main")
 
@@ -112,7 +114,10 @@ class NFTBot:
             # 2. Independent Candidate Evaluation / Refresh Cycle
             if (now - last_evaluation_time >= self.config.scheduler.candidate_refresh_interval_seconds) or (last_evaluation_time == 0.0):
                 # Retrieve collections due for evaluation (oldest evaluated first)
-                slugs_to_eval = self.state_store.get_collections_due_for_evaluation(limit=10)
+                slugs_to_eval = self.state_store.get_collections_due_for_evaluation(
+                    limit=self.config.scheduler.evaluations_per_cycle,
+                    shortlist_refresh_seconds=self.config.scheduler.shortlist_refresh_seconds,
+                )
                 if slugs_to_eval:
                     logger.info("Starting candidate refresh cycle for %d collections...", len(slugs_to_eval))
                     for slug in slugs_to_eval:
@@ -181,6 +186,14 @@ class NFTBot:
         print("\nDiscovery Checkpoints:")
         for source, info in summary.get("checkpoints", {}).items():
             print(f"  - Source '{source}': cursor={info.get('cursor') or 'START'}, updated_at={info.get('updated_at')}")
+        since = (now_local(self.config.general.bot_timezone).date() - timedelta(days=6)).strftime("%Y-%m-%d")
+        funnel = self.state_store.get_rejection_funnel(since)
+        print(f"\nRejection Funnel (last 7 days, since {since}; latest result per collection per day):")
+        if funnel:
+            for name, count in funnel.items():
+                print(f"  - {name}: {count}")
+        else:
+            print("  - no evaluations recorded yet")
         print("\nTelemetry:")
         for k, v in summary.get("telemetry", {}).items():
             print(f"  - {k}: {v.get('value')} (at {v.get('updated_at')})")

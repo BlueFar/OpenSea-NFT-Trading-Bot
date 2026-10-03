@@ -17,6 +17,8 @@ from src.config.settings import (
     ListedItemsFilterConfig,
     VerificationFilterConfig,
     ProjectAgeFilterConfig,
+    OfferToFloorFilterConfig,
+    NetProfitFilterConfig,
 )
 from src.collectors.orchestrator import CollectionEvaluator
 from src.storage.state_store import StateStore
@@ -78,6 +80,9 @@ def test_acceptance_1_and_2_end_to_end_pass_and_validate_info_md():
                 listed_items=ListedItemsFilterConfig(max_listed_pct=6.0),
                 verification=VerificationFilterConfig(required_status=["verified"]),
                 project_age=ProjectAgeFilterConfig(min_age_days=60.0),
+                # Profit gates observe-only here: this test pins exact Info.md numbers for a thin spread
+                offer_to_floor=OfferToFloorFilterConfig(enabled=False),
+                net_profit=NetProfitFilterConfig(enabled=False),
             ),
             trade_model=TradeModelConfig(
                 entry_offer_premium_pct=1.0,
@@ -226,7 +231,7 @@ def test_acceptance_3_existing_collection_reevaluation():
         curr_floor, p1, p7 = make_sample_floor_history(1.5, 2.0, 3.0)
         mock_provider.get_collection_stats.return_value = CollectionStats(floor_price=curr_floor)
         mock_provider.get_floor_price_history.side_effect = lambda slug, timeframe="one_day": p1 if timeframe == "one_day" else p7
-        mock_provider.get_top_offer.return_value = Offer(order_hash="0x1", chain="ethereum", price_value=1.0, price_currency="WETH")
+        mock_provider.get_top_offer.return_value = Offer(order_hash="0x1", chain="ethereum", price_value=0.9, price_currency="WETH")
 
         evaluator = CollectionEvaluator(mock_provider, state_store, config)
 
@@ -283,7 +288,7 @@ def test_acceptance_4_restart_recovery():
         mock_provider1.discover_top_collections.return_value = []
         mock_provider1.discover_trending_collections.return_value = []
 
-        cfg = DiscoveryConfig(max_pages_per_cycle=2, batch_size=50, enable_top=False, enable_trending=False)
+        cfg = DiscoveryConfig(max_pages_per_cycle=2, batch_size=50, enable_top=False, enable_trending=False, chains=[])
         discovery1 = DiscoveryEngine(mock_provider1, store1, cfg)
         slugs1 = discovery1.discover_next_batch()
 
@@ -348,7 +353,7 @@ def test_acceptance_5_api_key_lifecycle_and_auth_failure():
         mock_provider.get_active_listings_count.return_value = (None, False)
         mock_provider.get_collection_stats.return_value = CollectionStats(floor_price=1.5)
         mock_provider.get_floor_price_history.return_value = []
-        mock_provider.get_top_offer.return_value = Offer(order_hash="0x1", chain="ethereum", price_value=1.0, price_currency="WETH")
+        mock_provider.get_top_offer.return_value = Offer(order_hash="0x1", chain="ethereum", price_value=0.9, price_currency="WETH")
         mock_provider.get_sale_events.return_value = make_sample_sales_events([1, 1, 1, 1, 1, 1, 1])
 
         evaluator = CollectionEvaluator(mock_provider, store, config)
@@ -369,7 +374,7 @@ def test_acceptance_5_api_key_lifecycle_and_auth_failure():
         mock_provider.get_active_listings_count.return_value = (250, False)
         mock_provider.get_collection_stats.return_value = CollectionStats(floor_price=1.5)
         mock_provider.get_floor_price_history.return_value = []
-        mock_provider.get_top_offer.return_value = Offer(order_hash="0x1", chain="ethereum", price_value=1.0, price_currency="WETH")
+        mock_provider.get_top_offer.return_value = Offer(order_hash="0x1", chain="ethereum", price_value=0.9, price_currency="WETH")
         # API failure on sales returns None
         mock_provider.get_sale_events.return_value = None
 
@@ -419,7 +424,7 @@ def test_acceptance_7_failure_isolation():
         curr_floor, p1, p7 = make_sample_floor_history(1.5, 2.0, 3.0)
         mock_provider.get_collection_stats.return_value = CollectionStats(floor_price=curr_floor)
         mock_provider.get_floor_price_history.side_effect = lambda slug, timeframe="one_day": p1 if timeframe == "one_day" else p7
-        mock_provider.get_top_offer.return_value = Offer(order_hash="0x3", chain="ethereum", price_value=1.0, price_currency="WETH")
+        mock_provider.get_top_offer.return_value = Offer(order_hash="0x3", chain="ethereum", price_value=0.9, price_currency="WETH")
 
         evaluator = CollectionEvaluator(mock_provider, state_store, config)
 
@@ -462,7 +467,7 @@ def test_acceptance_8_long_running_multi_cycle_behavior():
     with tempfile.TemporaryDirectory() as temp_dir:
         data_root = os.path.join(temp_dir, "data")
         db_path = os.path.join(temp_dir, "state", "bot.db")
-        cfg = DiscoveryConfig(max_pages_per_cycle=1, batch_size=50, enable_top=False, enable_trending=False)
+        cfg = DiscoveryConfig(max_pages_per_cycle=1, batch_size=50, enable_top=False, enable_trending=False, chains=[])
         config = BotConfig(general=GeneralConfig(data_root=data_root, state_db_path=db_path), discovery=cfg)
         state_store = StateStore(db_path)
 
@@ -483,7 +488,7 @@ def test_acceptance_8_long_running_multi_cycle_behavior():
         curr_floor, p1, p7 = make_sample_floor_history(1.5, 2.0, 3.0)
         mock_provider.get_collection_stats.return_value = CollectionStats(floor_price=curr_floor)
         mock_provider.get_floor_price_history.side_effect = lambda slug, timeframe="one_day": p1 if timeframe == "one_day" else p7
-        mock_provider.get_top_offer.return_value = Offer(order_hash="0xa", chain="ethereum", price_value=1.0, price_currency="WETH")
+        mock_provider.get_top_offer.return_value = Offer(order_hash="0xa", chain="ethereum", price_value=0.9, price_currency="WETH")
 
         evaluator = CollectionEvaluator(mock_provider, state_store, config)
         discovery = DiscoveryEngine(mock_provider, state_store, cfg)
