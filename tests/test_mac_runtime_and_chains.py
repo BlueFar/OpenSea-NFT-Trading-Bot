@@ -277,7 +277,8 @@ def test_settings_rejects_bad_values_and_keeps_old_file(tmp_path):
 
 def test_overview_and_near_misses(tmp_path):
     cfg_path, cfg, store, ev = _settings_env(tmp_path)
-    today = datetime.now().strftime("%Y-%m-%d")
+    from src.utils.time import now_local
+    today = now_local(cfg.general.bot_timezone).strftime("%Y-%m-%d")  # the bot's day, not the machine's
     store.record_candidate("close", today, False, "x", reject_filter="offer_to_floor",
                            details={"name": "Close", "rule": "offer_to_floor", "value": 35.0, "limit": 40.0, "kind": "min"})
     store.record_candidate("far", today, False, "x", reject_filter="listed_items",
@@ -332,3 +333,38 @@ def test_rate_limit_wait_cancelled_raises_instead_of_returning_none():
     with patch.object(client.session, "request", side_effect=stop_then_429):
         with pytest.raises(OpenSeaNetworkError):
             client.get("/api/v2/collections/foo")
+
+
+# ---------------------------------------------------------------------------
+# A key changed in .env is used without reinstalling
+# ---------------------------------------------------------------------------
+def test_reload_env_replaces_key_inherited_from_parent(tmp_path, monkeypatch):
+    from src.config import settings
+    env = tmp_path / ".env"
+    env.write_text("OPENSEA_API_KEY=new-key\n")
+    monkeypatch.setattr(settings, "ENV_PATH", str(env))
+    monkeypatch.setenv("OPENSEA_API_KEY", "old-key-from-dashboard")
+    assert settings.reload_env() == "new-key"
+
+
+def test_running_bot_switches_to_new_key_from_env(tmp_path, monkeypatch):
+    import time as _time
+    from src import bot as bot_module
+    from src.config import settings
+    env = tmp_path / ".env"
+    env.write_text("OPENSEA_API_KEY=old-key\n")
+    monkeypatch.setattr(settings, "ENV_PATH", str(env))
+    monkeypatch.setattr(bot_module, "ENV_PATH", str(env))
+    monkeypatch.delenv("OPENSEA_API_KEY", raising=False)
+    cfg_path, _, _, _ = _settings_env(tmp_path)
+
+    b = bot_module.NFTBot(config=load_config(cfg_path), config_path=cfg_path)
+    try:
+        assert b.client.api_key == "old-key"
+        env.write_text("OPENSEA_API_KEY=new-key\n")
+        os.utime(env, (_time.time() + 5, _time.time() + 5))
+        b._maybe_reload_config()
+        assert b.client.api_key == "new-key"
+        assert b.client.session.headers["x-api-key"] == "new-key"
+    finally:
+        b.close()

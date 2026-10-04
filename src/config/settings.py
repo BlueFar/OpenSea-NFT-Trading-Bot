@@ -5,8 +5,24 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from .chains import ALL_CHAIN_IDS
 
+ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".env")
+
+
+def reload_env() -> Optional[str]:
+    """
+    Reads .env again, replacing values already in the environment, and returns the OpenSea key.
+    override=True matters: the bot is started by the dashboard and would otherwise inherit the
+    key the dashboard read when it started, ignoring a key changed in .env since then.
+    """
+    if os.path.exists(ENV_PATH):
+        load_dotenv(ENV_PATH, override=True)
+    else:
+        load_dotenv(override=True)
+    return os.getenv("OPENSEA_API_KEY")
+
+
 # Load .env if present
-load_dotenv()
+reload_env()
 
 class GeneralConfig(BaseModel):
     bot_timezone: str = "Asia/Kolkata"
@@ -141,7 +157,8 @@ def load_config(config_path: str = "config/config.yaml", use_overrides: bool = T
         with open(overrides_path, "r", encoding="utf-8") as f:
             raw_dict = deep_merge(raw_dict, yaml.safe_load(f) or {})
 
-    # Extract API key and environment overrides
+    # Extract API key and environment overrides (.env is re-read so a changed key is used)
+    reload_env()
     api_key = os.getenv("OPENSEA_API_KEY", raw_dict.get("opensea_api_key"))
     if os.getenv("BOT_TIMEZONE"):
         raw_dict.setdefault("general", {})["bot_timezone"] = os.getenv("BOT_TIMEZONE")

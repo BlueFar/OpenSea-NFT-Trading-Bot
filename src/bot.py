@@ -13,7 +13,7 @@ except ImportError:
     pass
 
 from typing import Optional, List
-from .config.settings import load_config, BotConfig, overrides_path_for
+from .config.settings import load_config, BotConfig, overrides_path_for, ENV_PATH
 from .providers.opensea.client import OpenSeaNetworkError
 from .runtime import control
 from .storage.state_store import StateStore
@@ -91,7 +91,7 @@ class NFTBot:
         if not self.config_path:
             return None
         out = []
-        for p in (self.config_path, overrides_path_for(self.config_path)):
+        for p in (self.config_path, overrides_path_for(self.config_path), ENV_PATH):
             try:
                 out.append(os.path.getmtime(p))
             except OSError:
@@ -109,6 +109,9 @@ class NFTBot:
             logger.error("Settings changed but could not be loaded (%s). Keeping the previous settings.", e)
             return
         self.config = new_cfg
+        if new_cfg.opensea_api_key != self.client.api_key:
+            self.client.set_api_key(new_cfg.opensea_api_key)
+            logger.info("OpenSea API key changed in .env. Using the new key.")
         self.discovery.config = new_cfg.discovery
         self.evaluator = CollectionEvaluator(provider=self.provider, state_store=self.state_store, config=new_cfg)
         logger.info("Settings changed. Using the new settings from the next check.")

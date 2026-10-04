@@ -59,6 +59,14 @@ class OpenSeaClient:
         self.last_rate_limit_remaining: Optional[int] = None
         self.last_rate_limit_reset: Optional[int] = None
 
+    def set_api_key(self, api_key: Optional[str]) -> None:
+        """Switches to a new key (e.g. after it was changed in .env) without a restart."""
+        self.api_key = api_key
+        if api_key:
+            self.session.headers["x-api-key"] = api_key
+        else:
+            self.session.headers.pop("x-api-key", None)
+
     def _sleep(self, seconds: float) -> None:
         if self.stop_event.wait(seconds):
             raise OpenSeaNetworkError("Stopping: request cancelled")

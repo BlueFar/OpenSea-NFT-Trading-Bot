@@ -8,7 +8,7 @@ from urllib.parse import urlparse, parse_qs
 
 import yaml
 
-from ..config.settings import load_config, BotConfig, overrides_path_for, deep_merge
+from ..config.settings import load_config, BotConfig, overrides_path_for, deep_merge, reload_env
 from ..config.chains import CHAINS, ALL_CHAIN_IDS
 from ..storage.state_store import StateStore
 from ..providers.opensea.client import OpenSeaClient, OpenSeaNetworkError
@@ -428,6 +428,13 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         if "opensea.io/collection/" in slug:
             slug = slug.split("opensea.io/collection/")[-1]
         slug = slug.split("?")[0].split("#")[0].strip("/ ").lower()
+
+        # Use the current key from .env, even if it changed after the dashboard started
+        client = getattr(getattr(self.evaluator, "provider", None), "client", None)
+        if client is not None and hasattr(client, "set_api_key"):
+            key = reload_env()
+            if key and key != client.api_key:
+                client.set_api_key(key)
 
         try:
             self.evaluator.last_details = None
