@@ -14,6 +14,7 @@ except ImportError:
 
 from typing import Optional, List
 from .config.settings import load_config, BotConfig, overrides_path_for, ENV_PATH
+from .utils.net import use_ipv4_only
 from .providers.opensea.client import OpenSeaNetworkError
 from .runtime import control
 from .storage.state_store import StateStore
@@ -44,6 +45,7 @@ class NFTBot:
         self.config_path = config_path
         self._config_mtimes = self._read_config_mtimes()
         self.state_store = StateStore(self.config.general.state_db_path)
+        use_ipv4_only(self.config.runtime.ipv4_only)
         self.client = OpenSeaClient(
             api_key=self.config.opensea_api_key,
             max_retries=self.config.scheduler.max_retries,
@@ -134,14 +136,14 @@ class NFTBot:
     # ------------------------------------------------------------------
     def _wait_until_online(self) -> None:
         rt = self.config.runtime
-        if control.is_online(rt.connectivity_host):
+        if control.is_online(rt.connectivity_host, ipv4_only=rt.ipv4_only):
             return
         started = time.time()
         logger.warning("No internet connection. Pausing until it is back...")
         self.state_store.update_telemetry("bot_status", "PAUSED_OFFLINE")
         self.state_store.update_telemetry("offline_since", started)
         self.state_store.log_event("offline", "No internet. The bot paused and will carry on by itself.")
-        while self._running and not control.is_online(rt.connectivity_host):
+        while self._running and not control.is_online(rt.connectivity_host, ipv4_only=rt.ipv4_only):
             for _ in range(max(1, rt.offline_check_seconds)):
                 if not self._running:
                     break

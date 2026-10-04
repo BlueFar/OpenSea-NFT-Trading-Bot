@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ..utils.logging import setup_logger
+from ..utils.net import can_connect
 
 logger = setup_logger("runtime_control")
 
@@ -190,12 +191,8 @@ class BotProcessManager:
 # ----------------------------------------------------------------------
 # Connectivity
 # ----------------------------------------------------------------------
-def is_online(host: str = "api.opensea.io", port: int = 443, timeout: float = 5.0) -> bool:
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
+def is_online(host: str = "api.opensea.io", port: int = 443, timeout: float = 5.0, ipv4_only: bool = True) -> bool:
+    return can_connect(host, port, timeout=timeout, ipv4_only=ipv4_only)
 
 
 # ----------------------------------------------------------------------

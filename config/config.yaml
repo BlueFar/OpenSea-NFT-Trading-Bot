@@ -92,3 +92,4 @@ runtime:
   offline_check_seconds: 30
   notify_new_candidates: true       # macOS notification when a new candidate is found
   notification_sound: false
+  ipv4_only: true                   # Some home networks have broken IPv6, which stalls every OpenSea call

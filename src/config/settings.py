@@ -119,6 +119,7 @@ class RuntimeConfig(BaseModel):
     offline_check_seconds: int = 30
     notify_new_candidates: bool = True        # macOS notification banner for each new candidate
     notification_sound: bool = False
+    ipv4_only: bool = True                    # Connect to OpenSea over IPv4 only (broken home IPv6 stalls every call)
 
 class BotConfig(BaseModel):
     general: GeneralConfig = Field(default_factory=GeneralConfig)

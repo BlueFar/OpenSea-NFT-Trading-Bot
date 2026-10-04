@@ -368,3 +368,29 @@ def test_running_bot_switches_to_new_key_from_env(tmp_path, monkeypatch):
         assert b.client.session.headers["x-api-key"] == "new-key"
     finally:
         b.close()
+
+
+# ---------------------------------------------------------------------------
+# Broken home IPv6: connect over IPv4 only
+# ---------------------------------------------------------------------------
+def test_ipv4_only_switch_for_requests():
+    import socket
+    import urllib3.util.connection as uc
+    from src.utils.net import use_ipv4_only
+    try:
+        use_ipv4_only(True)
+        assert uc.allowed_gai_family() == socket.AF_INET
+    finally:
+        use_ipv4_only(False)
+    assert uc.allowed_gai_family() != socket.AF_INET or not uc.HAS_IPV6
+
+
+def test_online_check_only_resolves_ipv4():
+    import socket
+    from src.utils import net
+    with patch.object(net.socket, "getaddrinfo", return_value=[]) as gai:
+        assert control.is_online("api.opensea.io") is False
+    assert gai.call_args[0][2] == socket.AF_INET
+    with patch.object(net.socket, "getaddrinfo", return_value=[]) as gai:
+        control.is_online("api.opensea.io", ipv4_only=False)
+    assert gai.call_args[0][2] == socket.AF_UNSPEC

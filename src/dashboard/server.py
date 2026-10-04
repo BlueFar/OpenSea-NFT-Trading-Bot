@@ -17,6 +17,7 @@ from ..collectors.orchestrator import CollectionEvaluator
 from ..runtime import control, launchd
 from ..runtime.control import BotProcessManager, PID_FILE, LOG_FILE, WORKSPACE_ROOT  # noqa: F401 (re-exported)
 from ..utils.logging import setup_logger
+from ..utils.net import use_ipv4_only
 from ..utils.time import now_local
 
 logger = setup_logger("dashboard_server")
@@ -647,6 +648,7 @@ def run_dashboard_server(host: str = "127.0.0.1", port: int = 5050, config_path:
     """Starts the dashboard HTTP server and the bot supervisor."""
     cfg = load_config(config_path)
     store = StateStore(cfg.general.state_db_path)
+    use_ipv4_only(cfg.runtime.ipv4_only)
     client = OpenSeaClient(api_key=cfg.opensea_api_key, request_delay=cfg.scheduler.request_delay_seconds)
     provider = OpenSeaProvider(client)
     evaluator = CollectionEvaluator(provider, store, cfg)
