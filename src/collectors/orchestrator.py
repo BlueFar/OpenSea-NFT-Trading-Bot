@@ -1,4 +1,5 @@
 import math
+import time
 from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timezone
 from ..providers.base import CollectionDataProvider
@@ -12,7 +13,8 @@ from ..metrics.calculator import (
     compute_listing_metrics,
 )
 from ..trade_model.calculator import compute_trade_economics
-from ..filters.engine import FilterEngine
+from ..filters.engine import FilterEngine, sales_7d_count, too_few_sales_reason
+from ..utils.prices import prices_from_payment_tokens, usd_rate
 from ..storage.state_store import StateStore
 from ..storage.file_writer import write_candidate_info_md
 from ..config.settings import BotConfig
@@ -63,6 +65,11 @@ class CollectionEvaluator:
         self.config = config
         self.filter_engine = FilterEngine(config.filters)
         self.last_details: Optional[Dict[str, Any]] = None  # details of the latest full evaluation
+        self._prices_saved_at: Dict[str, float] = {}
+        try:  # dollar prices seen before, until this run sees fresh ones
+            self._last_prices: Dict[str, float] = {k: v["usd"] for k, v in state_store.get_usd_prices().items()}
+        except Exception:
+            self._last_prices = {}
 
     # ------------------------------------------------------------------
     # Helpers
@@ -81,16 +88,30 @@ class CollectionEvaluator:
             "net_profit": (f.net_profit.min_net_roi_pct, "min", "%"),
         }
 
+    def _save_prices(self, prices: Dict[str, float]) -> None:
+        """Saves OpenSea's dollar prices, at most once every 10 minutes per coin."""
+        now = time.time()
+        due = {k: v for k, v in prices.items() if now - self._prices_saved_at.get(k, 0) > 600}
+        self._last_prices.update(prices)
+        if due:
+            try:
+                self.state_store.set_usd_prices(due)
+                for k in due:
+                    self._prices_saved_at[k] = now
+            except Exception as e:  # prices are a nice-to-have; never stop a check over them
+                logger.debug("Could not save USD prices: %s", e)
+
     def _enabled(self, rule: str) -> bool:
         return self.filter_engine.is_enabled(rule)
 
     def _reject_early(self, slug: str, date_str: str, filter_name: str, reason: str,
-                      ctx: Optional[Dict[str, Any]] = None, value: Any = None) -> None:
+                      ctx: Optional[Dict[str, Any]] = None, value: Any = None,
+                      limit_info: Optional[tuple] = None) -> None:
         """Records an early-exit rejection so the status funnel shows which filter is the bottleneck."""
         details = dict(ctx or {})
         details["rule"] = filter_name
         details["value"] = _num(value) if value is not None and not isinstance(value, str) else value
-        limit, kind, unit = self.rule_limits().get(filter_name, (None, "", ""))
+        limit, kind, unit = limit_info or self.rule_limits().get(filter_name, (None, "", ""))
         details.update({"limit": limit, "kind": kind, "unit": unit, "reason": reason, "early_exit": True})
         self.state_store.record_candidate(
             slug, date_str, is_pass=False, reasons=f"{filter_name}: {reason}",
@@ -165,6 +186,10 @@ class CollectionEvaluator:
             if stop:
                 self._reject_early(slug, date_str, "collection_fetch", "collection details could not be retrieved")
             return None
+
+        token_prices = prices_from_payment_tokens((collection.raw_data or {}).get("payment_tokens"))
+        if stop and token_prices:
+            self._save_prices(token_prices)
 
         chain = self._chain_of(slug, collection)
         ctx: Dict[str, Any] = {
@@ -308,6 +333,15 @@ class CollectionEvaluator:
                 self._reject_early(slug, date_str, "trading_frequency", f"{eval_trades_val:.2f} {cfg_tf.sale_count_mode}/day",
                                    ctx, eval_trades_val)
                 return None
+        week_total = sales_7d_count(sales_metrics, cfg_tf.sale_count_mode)
+        if sale_events is not None and cfg_tf.min_sales_7d > 0 and week_total < cfg_tf.min_sales_7d:
+            logger.info("[%s] Only %d sales in 7 days (< %d minimum)", slug, week_total, cfg_tf.min_sales_7d)
+            if stop and self._enabled("trading_frequency"):
+                ctx["sales_7d"] = week_total
+                self._reject_early(slug, date_str, "trading_frequency",
+                                   too_few_sales_reason(week_total, cfg_tf.min_sales_7d), ctx, week_total,
+                                   limit_info=(cfg_tf.min_sales_7d, "min", "sales in 7 days"))
+                return None
         ctx["checked"].append("trading_frequency")
 
         # Passed the cheap structural filters: re-check hourly so floor history keeps building
@@ -405,6 +439,11 @@ class CollectionEvaluator:
 
         details = self._full_details(ctx, collection, stats, listing_metrics, sales_metrics,
                                      floor_metrics, trade_economics, report, data_notes)
+        # Dollar rates at the time of the check, so the dashboard can show "worth $X when found"
+        rates = dict(self._last_prices)
+        rates.update(token_prices)
+        details["usd_rate"] = usd_rate(details.get("currency"), rates)
+        details["offer_usd_rate"] = usd_rate(details.get("offer_currency") or details.get("currency"), rates)
         self.last_details = details
 
         if not report.is_overall_pass:

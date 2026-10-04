@@ -28,6 +28,7 @@ filters:
     enabled: true
     metric: "average_daily_sales"   # Options: average_daily_sales, max_daily_sales, both
     max_threshold: 2.0
+    min_sales_7d: 1                  # At least this many sales in the last 7 days (0 = off)
     sale_count_mode: "transactions" # Options: transactions (default), item_quantity
   floor_change_1d:
     enabled: true

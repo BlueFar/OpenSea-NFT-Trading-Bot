@@ -63,6 +63,10 @@ at the same address and the bot should be running again within a few seconds.
 
 - **Home** shows whether the bot is running, what it checked today and why collections were rejected.
 - **Candidates** are collections that passed every rule. Click one for the trade plan and its Info.md.
+  Use **Sort by** and **Filters** (for example a minimum spread and your budget as the maximum buy price) to narrow the list.
+  These only change what's shown, not the bot's rules, and the page remembers them.
+- **Dollar values:** point at any coin amount (or tap it on a phone) to see it in US dollars now and, for candidates,
+  when they were found. Prices come from OpenSea, with CoinGecko filling in coins OpenSea hasn't priced yet.
 - **Near misses** are collections that missed one rule by a small margin. If one rule keeps showing up here, it may be too strict.
 - **Check a collection** tests any OpenSea collection against your rules right now.
 - **Settings** switches rules on or off, changes limits, picks chains and sets gas per chain.

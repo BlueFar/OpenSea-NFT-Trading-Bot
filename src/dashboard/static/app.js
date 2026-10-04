@@ -7,7 +7,7 @@
     { key: "verification", name: "Blue tick", desc: "Verified on OpenSea", kind: "bool" },
     { key: "project_age", name: "Collection age", desc: "Days since it was created on OpenSea", unit: "days", kind: "min", prefix: "More than" },
     { key: "listed_items", name: "Listed for sale", desc: "Share of the supply that's listed", unit: "%", kind: "max", prefix: "Under" },
-    { key: "trading_frequency", name: "Trading pace", desc: "Sales per day, averaged over 7 full days", unit: "per day", kind: "max", prefix: "At most" },
+    { key: "trading_frequency", name: "Trading pace", desc: "Sales per day, averaged over 7 full days, and at least some sales that week", unit: "per day", kind: "max", prefix: "At most" },
     { key: "floor_change_1d", name: "Floor move in 1 day", desc: "Up or down", unit: "%", kind: "max", prefix: "Under" },
     { key: "floor_change_7d", name: "Floor move in 7 days", desc: "Up or down", unit: "%", kind: "max", prefix: "Under" },
     { key: "offer_to_floor", name: "Spread over top offer", desc: "How far the floor sits above the top offer, royalty included", unit: "%", kind: "min", prefix: "At least" },
@@ -18,7 +18,7 @@
 
   var FUNNEL_LABELS = {
     verification: "No blue tick", project_age: "Too new", listed_items: "Too many listed",
-    trading_frequency: "Trades too often", floor_history_1d: "Waiting for floor history (1 day)",
+    trading_frequency: "Trades too often or not at all", floor_history_1d: "Waiting for floor history (1 day)",
     floor_history_7d: "Waiting for floor history (7 days)", floor_change_1d: "Floor moved (1 day)",
     floor_change_7d: "Floor moved (7 days)", offer_to_floor: "Spread too small", net_profit: "Profit too small",
     floor_price: "No floor price", total_supply: "Supply missing", collection_fetch: "Couldn't load details",
@@ -27,7 +27,8 @@
   var EVENT_COLORS = { candidate: "c-good", offline: "c-warn", error: "c-bad", online: "c-accent", start: "c-accent",
                        restart: "c-accent", stop: "c-muted", settings: "c-muted" };
 
-  var state = { overview: null, settings: null, draft: null, candDays: 7, near: null, tz: undefined, offline: false };
+  var state = { overview: null, settings: null, draft: null, candDays: 7, near: null, tz: undefined, offline: false,
+                prices: {}, aliases: {}, candItems: null };
 
   // ---------- Helpers ----------
   function $(id) { return document.getElementById(id); }
@@ -39,10 +40,36 @@
   function isNum(n) { return typeof n === "number" && isFinite(n); }
   function fmt(n, d) { return isNum(n) ? n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }) : "–"; }
   function int(n) { return isNum(n) ? Math.round(n).toLocaleString("en-US") : "–"; }
-  function money(n, cur) {
+  function moneyText(n, cur) {
     if (!isNum(n)) return "–";
     var a = Math.abs(n), d = a === 0 ? 2 : a < 0.01 ? 5 : a < 0.1 ? 4 : a < 10 ? 3 : 2;
     return fmt(n, d) + " " + (cur || "");
+  }
+  // A coin amount that shows its dollar value on hover (or tap on a phone).
+  // then = { rate, at }: the coin's dollar price when the candidate was found.
+  function money(n, cur, then) {
+    if (!isNum(n)) return "–";
+    var attrs = ' data-amt="' + n + '" data-cur="' + esc(cur || "") + '"';
+    if (then && isNum(then.rate)) attrs += ' data-then="' + then.rate + '" data-at="' + esc(then.at || "") + '"';
+    return '<span class="usd" tabindex="0"' + attrs + ">" + esc(moneyText(n, cur)) + "</span>";
+  }
+  function coinKey(cur) {
+    var c = String(cur || "").trim().toUpperCase();
+    return state.aliases[c] || c;
+  }
+  function usdRate(cur) {
+    var p = state.prices[coinKey(cur)];
+    return p && isNum(p.usd) ? p.usd : null;
+  }
+  function foundRate(d, offer) {
+    var r = offer ? (isNum(d.offer_usd_rate) ? d.offer_usd_rate : d.usd_rate) : d.usd_rate;
+    return d.found_at && isNum(r) ? { rate: r, at: d.found_at } : null;
+  }
+  function toUsd(n, cur) { var r = usdRate(cur); return isNum(n) && r != null ? n * r : null; }
+  function usd(n) {
+    if (!isNum(n)) return "–";
+    var a = Math.abs(n), d = a >= 1000 ? 0 : a >= 1 ? 2 : a >= 0.01 ? 3 : 5;
+    return (n < 0 ? "−$" : "$") + fmt(a, d);
   }
   function signed(n, d) { return isNum(n) ? (n > 0 ? "+" : n < 0 ? "−" : "") + fmt(Math.abs(n), d) : "–"; }
   function cap(s) { s = String(s || ""); return s.charAt(0).toUpperCase() + s.slice(1); }
@@ -120,7 +147,18 @@
     if (rule.unit === "%") return fmt(v, 1) + "%";
     if (rule.unit === "days") return fmt(v, 0) + " days";
     if (rule.unit === "per day") return fmt(v, 2) + "/day";
+    if (rule.unit === "sales") return int(v) + (v === 1 ? " sale" : " sales");
     return String(v);
+  }
+  var WEEK_SALES = { key: "trading_frequency", name: "Trading pace: sales this week", unit: "sales", kind: "min", prefix: "At least" };
+  // A trading-pace rejection for too few sales is measured in sales per week, not per day
+  function ruleFor(key, unit) {
+    if (key === "trading_frequency" && unit === "sales in 7 days") return WEEK_SALES;
+    return RULE_BY_KEY[key];
+  }
+  function minWeekSales() {
+    var r = state.settings && state.settings.rules && state.settings.rules.trading_frequency;
+    return r && isNum(r.min_sales_7d) ? r.min_sales_7d : 0;
   }
 
   // ---------- Navigation ----------
@@ -143,6 +181,63 @@
     var t = $("toast"); t.textContent = msg; t.classList.add("show");
     clearTimeout(toastTimer); toastTimer = setTimeout(function () { t.classList.remove("show"); }, 3600);
   }
+
+  // ---------- Dollar values (hover, focus or tap) ----------
+  function loadPrices() {
+    return api("/api/prices").then(function (r) {
+      state.prices = r.prices || {}; state.aliases = r.aliases || {};
+      if (state.candItems && $("page-candidates").classList.contains("active")) renderCandidates();
+      if (state.draft && $("page-settings").classList.contains("active") && !$("page-settings").contains(document.activeElement)) renderSettings();
+    }, function () {});
+  }
+  var tip = document.createElement("div");
+  tip.className = "usd-tip"; tip.setAttribute("role", "tooltip"); tip.hidden = true;
+  document.body.appendChild(tip);
+  var tipFor = null;
+  function tipHtml(el) {
+    var n = parseFloat(el.getAttribute("data-amt")), cur = el.getAttribute("data-cur"), p = state.prices[coinKey(cur)];
+    var lines = [];
+    if (p && isNum(p.usd)) {
+      lines.push('<strong>' + usd(n * p.usd) + "</strong> now");
+    } else {
+      lines.push("No dollar price for " + esc(cur || "this coin") + " yet");
+    }
+    var then = parseFloat(el.getAttribute("data-then"));
+    if (isNum(then)) {
+      var at = el.getAttribute("data-at");
+      lines.push('<strong>' + usd(n * then) + "</strong> when found" + (at ? " (" + esc(fmtDay(at)) + ")" : ""));
+    }
+    if (p && isNum(p.usd) && p.source !== "Stablecoin") {
+      lines.push('<span class="usd-src">1 ' + esc(coinKey(cur)) + " = " + usd(p.usd) + " · " + esc(p.source) + "</span>");
+    }
+    return lines.join("<br>");
+  }
+  function showTip(el) {
+    tipFor = el; tip.innerHTML = tipHtml(el); tip.hidden = false;
+    var r = el.getBoundingClientRect(), w = tip.offsetWidth, h = tip.offsetHeight;
+    var left = Math.min(Math.max(8, r.left + r.width / 2 - w / 2), window.innerWidth - w - 8);
+    var top = r.top - h - 8; if (top < 8) top = r.bottom + 8;
+    tip.style.left = left + "px"; tip.style.top = top + "px";
+  }
+  function hideTip() { tip.hidden = true; tipFor = null; }
+  var canHover = window.matchMedia && window.matchMedia("(hover: hover)").matches;
+  document.addEventListener("mouseover", function (e) {
+    if (!canHover) return;
+    var el = e.target.closest && e.target.closest(".usd");
+    if (el) { if (el !== tipFor) showTip(el); } else if (tipFor) hideTip();
+  });
+  document.addEventListener("focusin", function (e) {
+    // On touch screens the tap handler below shows it; a tap also focuses, which would toggle it twice
+    if (canHover && e.target.classList && e.target.classList.contains("usd")) showTip(e.target);
+  });
+  document.addEventListener("focusout", function (e) { if (e.target === tipFor) hideTip(); });
+  // On a phone a tap shows the dollar value instead of opening the card
+  document.addEventListener("click", function (e) {
+    var el = e.target.closest && e.target.closest(".usd");
+    if (el && !canHover) { e.preventDefault(); e.stopPropagation(); if (el === tipFor) hideTip(); else showTip(el); return; }
+    if (!canHover && tipFor) hideTip();
+  }, true);
+  window.addEventListener("scroll", hideTip, true);
 
   // ---------- Home ----------
   function greeting() {
@@ -271,24 +366,157 @@
 
   // ---------- Candidates ----------
   function candCard(item) {
-    var d = item.details || {}, cur = d.currency || "";
+    var d = item.details || {}, cur = d.currency || "", then = foundRate(d), offThen = foundRate(d, true);
     var nRules = RULES.filter(function (r) { var x = (d.rules || {})[r.key]; return x && x.enabled; }).length;
-    return '<button class="card cand" type="button" data-open="' + esc(item.slug) + '" data-date="' + esc(item.date_str) + '">' +
+    return '<div class="card cand" role="button" tabindex="0" data-open="' + esc(item.slug) + '" data-date="' + esc(item.date_str) + '">' +
       '<div class="cand-head">' + art(item.slug, d.image) + '<div style="min-width:0">' + nameLine(d.name || item.slug, d.verified) +
       '<div class="cand-meta">' + esc(chainName(d.chain)) + (isNum(d.supply) ? " · " + int(d.supply) + " items" : "") + "</div></div></div>" +
       '<dl class="kv" style="margin:0">' +
       '<div><dt>Spread over offer</dt><dd class="c-good">' + fmt(d.spread, 1) + "%</dd></div>" +
-      "<div><dt>Est. profit</dt><dd>" + money(d.net, cur) + " <small>" + fmt(d.roi, 0) + "%</small></dd></div>" +
-      "<div><dt>Floor</dt><dd>" + money(d.floor, cur) + "</dd></div>" +
-      "<div><dt>Top offer</dt><dd>" + money(d.offer, d.offer_currency || cur) + "</dd></div></dl>" +
+      "<div><dt>Est. profit</dt><dd>" + money(d.net, cur, then) + " <small>" + fmt(d.roi, 0) + "%</small></dd></div>" +
+      "<div><dt>Floor</dt><dd>" + money(d.floor, cur, then) + "</dd></div>" +
+      "<div><dt>Top offer</dt><dd>" + money(d.offer, d.offer_currency || cur, offThen) + "</dd></div></dl>" +
       '<div class="cand-foot"><span>Found ' + esc(fmtDay(d.found_at || item.created_at, true)) + "</span>" +
-      '<span class="pill good">Passed ' + (nRules ? "all " + nRules + " rules" : "") + "</span></div></button>";
+      '<span class="pill good">Passed ' + (nRules ? "all " + nRules + " rules" : "") + "</span></div></div>";
+  }
+
+  // Sorting and filters only change what's shown here, never the bot's rules.
+  var SORTS = [
+    ["latest", "Latest found"],
+    ["spread", "Highest spread over offer"],
+    ["profit", "Highest profit in $"],
+    ["roi", "Highest return %"],
+    ["cheap", "Cheapest to buy in $"],
+    ["sales_hi", "Most sales this week"],
+    ["sales_lo", "Fewest sales this week"],
+    ["listed", "Fewest listed for sale"],
+    ["name", "Name A–Z"],
+    ["chain", "Blockchain"]
+  ];
+  var FILTERS = [
+    ["spread", "Min spread over offer", "%", "min"],
+    ["buy", "Max buy price", "$", "max"],
+    ["profit", "Min profit", "$", "min"],
+    ["roi", "Min return", "%", "min"],
+    ["listed", "Max listed for sale", "%", "max"],
+    ["sales", "Min sales this week", "", "min"]
+  ];
+  var VIEW_KEY = "nftmonitor.candidates.view";
+  function loadView() {
+    var v = null;
+    try { v = JSON.parse(localStorage.getItem(VIEW_KEY) || "null"); } catch (e) {}
+    v = v && typeof v === "object" ? v : {};
+    return { sort: SORTS.some(function (x) { return x[0] === v.sort; }) ? v.sort : "latest",
+             f: v.f && typeof v.f === "object" ? v.f : {}, chains: Array.isArray(v.chains) ? v.chains : [], open: !!v.open };
+  }
+  var view = loadView();
+  function saveView() { try { localStorage.setItem(VIEW_KEY, JSON.stringify(view)); } catch (e) {} }
+
+  // The numbers each sort and filter uses, in dollars where it matters
+  function metrics(item) {
+    var d = item.details || {}, cur = d.currency || "";
+    var buy = isNum(d.entry) ? d.entry : d.offer;
+    return {
+      spread: d.spread, roi: d.roi, listed: d.listed_pct, sales: d.sales_7d,
+      profit: toUsd(d.net, cur), buy: toUsd(buy, cur),
+      name: String(d.name || item.slug).toLowerCase(), chain: chainName(d.chain).toLowerCase()
+    };
+  }
+  function activeFilters() {
+    var n = FILTERS.filter(function (f) { return isNum(view.f[f[0]]); }).length;
+    return n + (view.chains.length ? 1 : 0);
+  }
+  function passes(m, item) {
+    for (var i = 0; i < FILTERS.length; i++) {
+      var k = FILTERS[i][0], lim = view.f[k];
+      if (!isNum(lim)) continue;
+      var v = m[k];
+      if (!isNum(v)) return false;  // unknown value (e.g. no dollar price yet) can't meet the filter
+      if (FILTERS[i][3] === "min" ? v < lim : v > lim) return false;
+    }
+    if (view.chains.length && view.chains.indexOf((item.details || {}).chain) < 0) return false;
+    return true;
+  }
+  function byNum(key, dir) {
+    return function (a, b) {
+      var x = a.m[key], y = b.m[key];
+      if (!isNum(x) && !isNum(y)) return a.i - b.i;
+      if (!isNum(x)) return 1;
+      if (!isNum(y)) return -1;
+      return (x - y) * dir || a.i - b.i;
+    };
+  }
+  function sorter(key) {
+    switch (key) {
+      case "spread": return byNum("spread", -1);
+      case "profit": return byNum("profit", -1);
+      case "roi": return byNum("roi", -1);
+      case "cheap": return byNum("buy", 1);
+      case "sales_hi": return byNum("sales", -1);
+      case "sales_lo": return byNum("sales", 1);
+      case "listed": return byNum("listed", 1);
+      case "name": return function (a, b) { return a.m.name.localeCompare(b.m.name) || a.i - b.i; };
+      case "chain": return function (a, b) { return a.m.chain.localeCompare(b.m.chain) || a.i - b.i; };
+      default: return function (a, b) { return a.i - b.i; };
+    }
+  }
+
+  function renderCandTools(items) {
+    var present = {};
+    items.forEach(function (it) { var c = (it.details || {}).chain; if (c) present[c] = true; });
+    view.chains.forEach(function (c) { present[c] = true; });
+    var chains = Object.keys(present).sort(function (a, b) { return chainName(a).localeCompare(chainName(b)); });
+    var n = activeFilters();
+    $("candTools").innerHTML =
+      '<div class="cand-bar">' +
+      '<label class="field" for="candSort">Sort by <select id="candSort">' + SORTS.map(function (x) {
+        return '<option value="' + x[0] + '"' + (x[0] === view.sort ? " selected" : "") + ">" + esc(x[1]) + "</option>";
+      }).join("") + "</select></label>" +
+      '<button class="btn" type="button" id="candFilterBtn" aria-expanded="' + view.open + '" aria-controls="candFilters">' +
+      '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 6h16M7 12h10M10 18h4"/></svg>Filters' +
+      (n ? ' <span class="count">' + n + "</span>" : "") + "</button>" +
+      '<span class="muted" id="candCount"></span>' +
+      (n ? '<button class="btn ghost" type="button" id="candClear">Clear filters</button>' : "") + "</div>" +
+      '<div class="card cand-filters" id="candFilters"' + (view.open ? "" : " hidden") + ">" +
+      '<div class="filter-grid">' + FILTERS.map(function (f) {
+        var v = view.f[f[0]];
+        return '<label class="field" for="cf-' + f[0] + '"><span>' + esc(f[1]) + "</span><span class=\"in\">" + (f[2] === "$" ? "$" : "") +
+          '<input id="cf-' + f[0] + '" type="number" step="any" min="0" inputmode="decimal" placeholder="Any" value="' + (isNum(v) ? v : "") + '">' +
+          (f[2] === "%" ? "%" : "") + "</span></label>";
+      }).join("") + "</div>" +
+      (chains.length ? '<div class="filter-chains"><span class="muted">Chains</span><div class="chips" role="group" aria-label="Chains">' + chains.map(function (c) {
+        return '<button class="chip" type="button" data-chain="' + esc(c) + '" aria-pressed="' + (view.chains.indexOf(c) >= 0) + '">' + esc(chainName(c)) + "</button>";
+      }).join("") + "</div></div>" : "") +
+      '<p class="chart-note">Only changes what\'s shown here. Dollar amounts use today\'s prices; leave a box empty for no limit.</p></div>';
+  }
+
+  function renderCandidates() {
+    var items = state.candItems || [];
+    if (!$("candTools").firstChild || !$("candTools").contains(document.activeElement)) renderCandTools(items);
+    var rows = items.map(function (it, i) { return { it: it, i: i, m: metrics(it) }; });
+    var shown = rows.filter(function (r) { return passes(r.m, r.it); }).sort(sorter(view.sort));
+    if (view.sort === "chain") {
+      var html = "", last = null;
+      shown.forEach(function (r) {
+        var c = chainName((r.it.details || {}).chain) || "Other";
+        if (c !== last) { html += '<h3 class="grid-group">' + esc(c) + "</h3>"; last = c; }
+        html += candCard(r.it);
+      });
+      $("candGrid").innerHTML = html;
+    } else {
+      $("candGrid").innerHTML = shown.map(function (r) { return candCard(r.it); }).join("");
+    }
+    if (!items.length) {
+      $("candGrid").innerHTML = '<div class="card empty" style="grid-column:1/-1"><h3>No candidates in this period</h3>Check Near misses to see which rule is holding collections back.</div>';
+    } else if (!shown.length) {
+      $("candGrid").innerHTML = '<div class="card empty" style="grid-column:1/-1"><h3>No candidates match these filters</h3>Loosen a filter or clear them to see all ' + items.length + ".</div>";
+    }
+    $("candCount").textContent = items.length ? (shown.length === items.length ? items.length + " shown" : shown.length + " of " + items.length + " shown") : "";
   }
   function loadCandidates() {
     api("/api/candidates?days=" + state.candDays).then(function (r) {
-      var items = r.items || [];
-      $("candGrid").innerHTML = items.length ? items.map(candCard).join("") :
-        '<div class="card empty" style="grid-column:1/-1"><h3>No candidates in this period</h3>Check Near misses to see which rule is holding collections back.</div>';
+      state.candItems = r.items || [];
+      renderCandidates();
     }, function (e) { $("candGrid").innerHTML = '<div class="card empty" style="grid-column:1/-1">' + esc(e.message) + "</div>"; });
   }
   $("rangeChips").addEventListener("click", function (e) {
@@ -296,6 +524,27 @@
     state.candDays = parseInt(b.getAttribute("data-days"), 10);
     document.querySelectorAll("#rangeChips .chip").forEach(function (c) { c.setAttribute("aria-pressed", String(c === b)); });
     loadCandidates();
+  });
+  $("candTools").addEventListener("change", function (e) {
+    if (e.target.id === "candSort") { view.sort = e.target.value; saveView(); renderCandidates(); }
+  });
+  $("candTools").addEventListener("input", function (e) {
+    var id = e.target.id; if (id.indexOf("cf-") !== 0) return;
+    var v = parseFloat(e.target.value), k = id.slice(3);
+    if (isNaN(v)) delete view.f[k]; else view.f[k] = v;
+    saveView(); renderCandidates();
+    var btn = $("candFilterBtn"), n = activeFilters();
+    if (btn) { var c = btn.querySelector(".count"); if (n && !c) { c = document.createElement("span"); c.className = "count"; btn.appendChild(document.createTextNode(" ")); btn.appendChild(c); } if (c) { if (n) c.textContent = n; else c.remove(); } }
+  });
+  $("candTools").addEventListener("click", function (e) {
+    var b = e.target.closest("button"); if (!b) return;
+    if (b.id === "candFilterBtn") { view.open = !view.open; }
+    else if (b.id === "candClear") { view.f = {}; view.chains = []; }
+    else if (b.hasAttribute("data-chain")) {
+      var c = b.getAttribute("data-chain"), i = view.chains.indexOf(c);
+      if (i >= 0) view.chains.splice(i, 1); else view.chains.push(c);
+    } else return;
+    saveView(); renderCandTools(state.candItems || []); renderCandidates();
   });
 
   // ---------- Near misses ----------
@@ -306,11 +555,11 @@
   }
   function shortBy(d, rule) {
     var diff = Math.abs(d.value - d.limit);
-    var u = rule.unit === "%" ? " points" : rule.unit === "days" ? " days" : " sales/day";
-    return fmt(diff, rule.unit === "days" ? 0 : rule.unit === "per day" ? 2 : 1) + u + (d.kind === "max" ? " over" : " short");
+    var u = rule.unit === "%" ? " points" : rule.unit === "days" ? " days" : rule.unit === "sales" ? " sales" : " sales/day";
+    return fmt(diff, rule.unit === "days" || rule.unit === "sales" ? 0 : rule.unit === "per day" ? 2 : 1) + u + (d.kind === "max" ? " over" : " short");
   }
   function nmRow(r) {
-    var d = r.details || {}, rule = RULE_BY_KEY[r.reject_filter || d.rule] || { name: r.reject_filter, unit: "" };
+    var d = r.details || {}, rule = ruleFor(r.reject_filter || d.rule, d.unit) || { name: r.reject_filter, unit: "" };
     var also = (d.failed_rules || []).filter(function (k) { return k !== rule.key; });
     var note = d.early_exit ? '<div class="nm-off">Stopped at this rule, so later rules weren\'t checked.</div>' :
       also.length ? '<div class="nm-off">Also fails ' + esc(also.map(function (k) { return (RULE_BY_KEY[k] || { name: k }).name.toLowerCase(); }).join(", ")) + "</div>" : "";
@@ -339,25 +588,29 @@
 
   // ---------- Rule checklist (drawer and Check page) ----------
   function ruleRow(key, x, d) {
-    var rule = RULE_BY_KEY[key] || { name: key, unit: "" }, res = x.result, on = x.enabled !== false;
+    var rule = ruleFor(key, x.unit) || { name: key, unit: "" }, res = x.result, on = x.enabled !== false;
     var wouldFail = /would have been (FAIL|DATA_INSUFFICIENT)/.test(x.note || x.notes || "");
     var ico = !on ? '<span class="ico off">' + I_OFF + "</span>" : res === "PASS" ? '<span class="ico ok">' + I_OK + "</span>" :
       res === "DATA_INSUFFICIENT" ? '<span class="ico wait">' + I_WAIT + "</span>" : res === "OBSERVE" ? '<span class="ico off">' + I_OFF + "</span>" :
       '<span class="ico no">' + I_NO + "</span>";
     var val = x.value, shown;
-    if (key === "verification") shown = String(val) === "verified" ? "Verified" : "No blue tick";
+    if (key === "verification") shown = String(val) === "verified" || (res === "PASS" && !val) ? "Verified" : "No blue tick";
     else if (isNum(val)) shown = unitText(rule, val);
     else if (res === "DATA_INSUFFICIENT") shown = "Waiting";
     else shown = val == null || val === "None" ? "–" : String(val);
     var why;
     if (key === "verification") why = "Needs the OpenSea blue tick";
-    else if (x.limit != null) why = (rule.prefix || "Limit") + " " + unitText(rule, x.limit).replace("/day", " a day");
+    else if (x.limit != null) why = (rule.prefix || "Limit") + " " + unitText(rule, x.limit).replace("/day", " a day") + (rule === WEEK_SALES ? " in the last 7 days" : "");
     else why = rule.desc || "";
+    if (key === "trading_frequency" && rule !== WEEK_SALES && x.limit != null && minWeekSales() > 0) {
+      why += " and at least " + unitText(WEEK_SALES, minWeekSales()) + " in 7 days";
+    }
     if (res === "DATA_INSUFFICIENT" && on) why = (key.indexOf("floor_change") === 0 ? "No saved floor price from back then yet" : "Not enough data");
-    if (key === "floor_change_1d" && d && isNum(d.floor_1d)) why += " · floor " + money(d.floor_1d, d.currency) + " → " + money(d.floor, d.currency);
-    if (key === "floor_change_7d" && d && isNum(d.floor_7d)) why += " · floor " + money(d.floor_7d, d.currency) + " → " + money(d.floor, d.currency);
-    if (!on) why += " · switched off" + (wouldFail ? ", would have failed" : "");
-    return "<li>" + ico + '<div style="min-width:0"><div class="rule-name">' + esc(rule.name) + '</div><div class="rule-why">' + esc(why) + "</div></div>" +
+    var whyHtml = esc(why), then = d && foundRate(d);
+    if (key === "floor_change_1d" && d && isNum(d.floor_1d)) whyHtml += " · floor " + money(d.floor_1d, d.currency, then) + " → " + money(d.floor, d.currency, then);
+    if (key === "floor_change_7d" && d && isNum(d.floor_7d)) whyHtml += " · floor " + money(d.floor_7d, d.currency, then) + " → " + money(d.floor, d.currency, then);
+    if (!on) whyHtml += esc(" · switched off" + (wouldFail ? ", would have failed" : ""));
+    return "<li>" + ico + '<div style="min-width:0"><div class="rule-name">' + esc(rule.name) + '</div><div class="rule-why">' + whyHtml + "</div></div>" +
       '<span class="rule-val">' + esc(shown) + "</span></li>";
   }
   function checklistFromDetails(d) {
@@ -366,7 +619,7 @@
     var rows = (d.checked || []).map(function (k) { return ruleRow(k, { result: "PASS", enabled: true, limit: null, value: "" }, d); });
     if (d.rule) {
       var rule = RULE_BY_KEY[d.rule];
-      if (rule) rows.push(ruleRow(d.rule, { result: d.rule.indexOf("floor_history") === 0 ? "DATA_INSUFFICIENT" : "FAIL", enabled: true, limit: d.limit, value: d.value }, d));
+      if (rule) rows.push(ruleRow(d.rule, { result: d.rule.indexOf("floor_history") === 0 ? "DATA_INSUFFICIENT" : "FAIL", enabled: true, limit: d.limit, value: d.value, unit: d.unit }, d));
       else rows.push('<li><span class="ico wait">' + I_WAIT + '</span><div><div class="rule-name">' + esc(FUNNEL_LABELS[d.rule] || d.rule) + '</div><div class="rule-why">' + esc(d.reason || "") + "</div></div><span></span></li>");
     }
     return '<ul class="checklist">' + rows.join("") + '</ul><p class="chart-note" style="padding:0 20px 14px;margin:0">The bot stops at the first rule a collection fails, so later rules weren\'t checked.</p>';
@@ -388,27 +641,33 @@
     if (lastFocus && lastFocus.focus) lastFocus.focus(); lastFocus = null;
   }
   overlay.addEventListener("click", closeDrawer);
-  document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeDrawer(); });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") { closeDrawer(); hideTip(); return; }
+    var t = e.target;
+    if ((e.key === "Enter" || e.key === " ") && t.getAttribute && t.getAttribute("role") === "button" && t.hasAttribute("data-open")) {
+      e.preventDefault(); openDrawer(t.getAttribute("data-open"), t.getAttribute("data-date"));
+    }
+  });
   document.addEventListener("click", function (e) {
     var b = e.target.closest("[data-open]"); if (b) openDrawer(b.getAttribute("data-open"), b.getAttribute("data-date"));
   });
 
   function drawerBody(d, extra, skipRules) {
-    var cur = d.currency || "", lim = (state.overview && state.overview.limits) || {};
+    var cur = d.currency || "", then = foundRate(d), offThen = foundRate(d, true), lim = (state.overview && state.overview.limits) || {};
     var html = "";
     if (isNum(d.spread) || isNum(d.net)) {
       html += '<div class="hero-nums"><div class="card"><div class="l">Spread over top offer</div><div class="v ' + (d.spread >= (lim.offer_to_floor || 0) ? "c-good" : "c-warn") + '">' + fmt(d.spread, 1) +
         '%</div><div class="l">needs ' + esc(lim.offer_to_floor) + "%</div></div>" +
-        '<div class="card"><div class="l">Estimated profit</div><div class="v">' + money(d.net, cur) + '</div><div class="l">' + fmt(d.roi, 1) + "% return</div></div></div>";
+        '<div class="card"><div class="l">Estimated profit</div><div class="v">' + money(d.net, cur, then) + '</div><div class="l">' + fmt(d.roi, 1) + "% return</div></div></div>";
     }
     if (isNum(d.entry) && isNum(d.exit)) {
       html += '<div class="card panel"><div class="section-title"><h2>Trade plan</h2><span>Estimate, not a guarantee</span></div><table class="tbl"><tbody>' +
-        "<tr><td>Buy with a bid " + fmt(d.bid_premium_pct, 1) + '% above top offer <span class="sub">(' + money(d.offer, d.offer_currency || cur) + ")</span></td><td>" + money(d.entry, cur) + "</td></tr>" +
-        "<tr><td>Sell " + fmt(d.sell_discount_pct, 1) + '% under floor <span class="sub">(' + money(d.floor, cur) + ")</span></td><td>" + money(d.exit, cur) + "</td></tr>" +
-        "<tr><td>OpenSea fee " + fmt(d.fee_pct, 1) + '% <span class="sub">(' + esc(d.fee_source || "") + ")</span></td><td>−" + money(d.fee_amount, cur) + "</td></tr>" +
-        "<tr><td>Creator royalty " + fmt(d.royalty_pct, 1) + "%</td><td>−" + money(d.royalty_amount, cur) + "</td></tr>" +
-        "<tr><td>Gas estimate</td><td>−" + money(d.gas, cur) + "</td></tr>" +
-        '<tr class="total"><td>Net profit</td><td>' + money(d.net, cur) + "</td></tr></tbody></table>" +
+        "<tr><td>Buy with a bid " + fmt(d.bid_premium_pct, 1) + '% above top offer <span class="sub">(' + money(d.offer, d.offer_currency || cur, offThen) + ")</span></td><td>" + money(d.entry, cur, then) + "</td></tr>" +
+        "<tr><td>Sell " + fmt(d.sell_discount_pct, 1) + '% under floor <span class="sub">(' + money(d.floor, cur, then) + ")</span></td><td>" + money(d.exit, cur, then) + "</td></tr>" +
+        "<tr><td>OpenSea fee " + fmt(d.fee_pct, 1) + '% <span class="sub">(' + esc(d.fee_source || "") + ")</span></td><td>−" + money(d.fee_amount, cur, then) + "</td></tr>" +
+        "<tr><td>Creator royalty " + fmt(d.royalty_pct, 1) + "%</td><td>−" + money(d.royalty_amount, cur, then) + "</td></tr>" +
+        "<tr><td>Gas estimate</td><td>−" + money(d.gas, cur, then) + "</td></tr>" +
+        '<tr class="total"><td>Net profit</td><td>' + money(d.net, cur, then) + "</td></tr></tbody></table>" +
         (d.economics_note ? '<p class="chart-note">' + esc(d.economics_note) + "</p>" : "") + "</div>";
     }
     var sd = d.sales_daily || [];
@@ -484,12 +743,18 @@
   function isDirty() { return !!(state.settings && state.draft && JSON.stringify(state.draft) !== JSON.stringify(state.settings)); }
   function sw(id, on, label) { return '<button class="switch" type="button" role="switch" id="' + id + '" aria-checked="' + on + '" aria-label="' + esc(label) + '"></button>'; }
 
+  function gasUsd(c) { var u = toUsd(c.gas, c.coin); return u == null ? "" : "≈ " + usd(u); }
   function renderSettings() {
     var s = state.draft; if (!s) return;
     $("ruleRows").innerHTML = RULES.map(function (r) {
       var cfg = s.rules[r.key];
+      var dis = cfg.enabled ? "" : " disabled";
       var field = r.kind === "bool" ? '<span class="field">Required</span>' :
-        '<label class="field" for="v-' + r.key + '">' + r.prefix + ' <input id="v-' + r.key + '" type="number" step="any" min="0" value="' + esc(cfg.value) + '"' + (cfg.enabled ? "" : " disabled") + "> " + r.unit + "</label>";
+        '<label class="field" for="v-' + r.key + '">' + r.prefix + ' <input id="v-' + r.key + '" type="number" step="any" min="0" value="' + esc(cfg.value) + '"' + dis + "> " + (r.unit === "per day" ? "a day" : r.unit) + "</label>";
+      if (r.key === "trading_frequency") {
+        field = '<div class="field-stack">' + field + '<label class="field" for="v2-trading_frequency">At least <input id="v2-trading_frequency" type="number" step="1" min="0" value="' +
+          esc(cfg.min_sales_7d) + '"' + dis + "> sales in 7 days</label></div>";
+      }
       return '<div class="set-row' + (cfg.enabled ? "" : " off") + '">' + sw("on-" + r.key, cfg.enabled, r.name) +
         '<div style="min-width:0"><div class="label">' + r.name + '</div><div class="desc">' + r.desc + "</div>" +
         (cfg.enabled ? "" : '<div class="off-note">Off: still measured, but it won\'t reject collections</div>') + "</div>" + field + "</div>";
@@ -513,7 +778,8 @@
       if (c.kind !== last) { rows += '<div class="chain-group">' + groups[c.kind] + "</div>"; last = c.kind; }
       rows += '<div class="chain-row' + (c.enabled ? "" : " off") + '">' + sw("ch-" + i, c.enabled, c.name) +
         '<div style="min-width:0"><div class="label">' + esc(c.name) + '</div><div class="desc">Gas paid in ' + esc(c.coin) + "</div></div>" +
-        '<label class="field" for="g-' + i + '">Gas <input id="g-' + i + '" type="number" step="any" min="0" value="' + esc(c.gas) + '"> ' + esc(c.coin) + "</label></div>";
+        '<label class="field" for="g-' + i + '">Gas <input id="g-' + i + '" type="number" step="any" min="0" value="' + esc(c.gas) + '"> ' + esc(c.coin) +
+        ' <span class="gas-usd" id="gu-' + i + '">' + gasUsd(c) + "</span></label></div>";
     });
     $("chainRows").innerHTML = rows;
 
@@ -554,8 +820,9 @@
     var el = e.target, v = parseFloat(el.value), s = state.draft;
     if (!s || isNaN(v)) return;
     if (el.id.indexOf("v-") === 0) s.rules[el.id.slice(2)].value = v;
+    else if (el.id === "v2-trading_frequency") s.rules.trading_frequency.min_sales_7d = Math.max(0, Math.round(v));
     else if (el.id.indexOf("t-") === 0) s.trade[el.id.slice(2)] = v;
-    else if (el.id.indexOf("g-") === 0) s.chains[+el.id.slice(2)].gas = v;
+    else if (el.id.indexOf("g-") === 0) { s.chains[+el.id.slice(2)].gas = v; var gu = $("gu-" + el.id.slice(2)); if (gu) gu.textContent = gasUsd(s.chains[+el.id.slice(2)]); }
     $("saveBar").hidden = !isDirty();
   });
   $("btnDiscard").addEventListener("click", function () { state.draft = clone(state.settings); renderSettings(); toast("Changes discarded"); });
@@ -582,6 +849,8 @@
     if (page === "candidates") loadCandidates();
     if (page === "near") loadNear();
   }
+  loadPrices();
+  setInterval(loadPrices, 5 * 60 * 1000);
   loadSettings().then(function () {
     loadOverview().then(function () { loadNear(); });
     var start = (location.hash || "").replace("#", "");

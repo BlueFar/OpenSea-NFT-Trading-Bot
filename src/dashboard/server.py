@@ -18,6 +18,7 @@ from ..runtime import control, launchd
 from ..runtime.control import BotProcessManager, PID_FILE, LOG_FILE, WORKSPACE_ROOT  # noqa: F401 (re-exported)
 from ..utils.logging import setup_logger
 from ..utils.net import use_ipv4_only
+from ..utils.prices import PriceBook, WRAPPED_TO_NATIVE
 from ..utils.time import now_local
 
 logger = setup_logger("dashboard_server")
@@ -103,6 +104,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
     state_store: StateStore
     evaluator: CollectionEvaluator
     config_path: str = "config/config.yaml"
+    price_book: Optional[PriceBook] = None
 
     def log_message(self, format, *args):
         # Suppress verbose standard HTTP server logging in production
@@ -175,6 +177,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             "/api/inspect": lambda: self._handle_inspect_collection(query),
             "/api/settings": lambda: self._handle_get_settings(),
             "/api/logs": lambda: self._handle_get_logs(query),
+            "/api/prices": lambda: self._handle_get_prices(),
         }
         if path in routes:
             routes[path]()
@@ -486,6 +489,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         for key, field in RULE_LIMIT_FIELDS.items():
             rc = getattr(cfg.filters, key)
             rules[key] = {"enabled": bool(getattr(rc, "enabled", True)), "value": getattr(rc, field) if field else None}
+        rules["trading_frequency"]["min_sales_7d"] = cfg.filters.trading_frequency.min_sales_7d
         tm = cfg.trade_model
         enabled = set(cfg.discovery.chains)
         chains = []
@@ -509,6 +513,12 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             },
             "autostart": {"installed": launchd.is_installed()},
         }
+
+    def _handle_get_prices(self):
+        book = getattr(type(self), "price_book", None)
+        if book is None:
+            book = type(self).price_book = PriceBook(self.state_store)
+        self._send_json({"prices": book.prices(), "aliases": WRAPPED_TO_NATIVE})
 
     def _handle_get_settings(self):
         self._send_json(self._settings_payload())
@@ -535,6 +545,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             field = RULE_LIMIT_FIELDS[key]
             if field and rule.get("value") is not None:
                 entry[field] = self._number(rule["value"], key)
+            if key == "trading_frequency" and rule.get("min_sales_7d") is not None:
+                entry["min_sales_7d"] = int(self._number(rule["min_sales_7d"], "sales in 7 days"))
             filters[key] = entry
         if filters:
             out["filters"] = filters
@@ -658,6 +670,7 @@ def run_dashboard_server(host: str = "127.0.0.1", port: int = 5050, config_path:
     DashboardRequestHandler.state_store = store
     DashboardRequestHandler.evaluator = evaluator
     DashboardRequestHandler.config_path = config_path
+    DashboardRequestHandler.price_book = PriceBook(store)
 
     if supervise:
         sup = control.Supervisor(config_path=config_path, state_store=store)

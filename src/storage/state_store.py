@@ -86,6 +86,14 @@ class StateStore:
                     message TEXT
                 )
             """)
+            # Dollar price per coin, from collections' OpenSea payment tokens (for the dashboard)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS usd_prices (
+                    symbol TEXT PRIMARY KEY,
+                    usd REAL,
+                    updated_at TEXT
+                )
+            """)
             conn.commit()
 
     @staticmethod
@@ -383,6 +391,22 @@ class StateStore:
                 ORDER BY COUNT(*) DESC
             """, (since_date_str,))
             return {row[0]: row[1] for row in c.fetchall()}
+
+    def set_usd_prices(self, prices: Dict[str, float]):
+        if not prices:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            conn.executemany("""
+                INSERT INTO usd_prices (symbol, usd, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET usd=excluded.usd, updated_at=excluded.updated_at
+            """, [(sym, float(usd), now) for sym, usd in prices.items()])
+            conn.commit()
+
+    def get_usd_prices(self) -> Dict[str, Dict[str, Any]]:
+        with self._get_connection() as conn:
+            rows = conn.execute("SELECT symbol, usd, updated_at FROM usd_prices").fetchall()
+        return {r[0]: {"usd": r[1], "updated_at": r[2]} for r in rows}
 
     def update_telemetry(self, key: str, value: Any):
         """Updates a key-value telemetry item."""

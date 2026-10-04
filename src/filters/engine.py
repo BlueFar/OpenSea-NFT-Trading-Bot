@@ -261,6 +261,15 @@ class FilterEngine:
             eval_val = avg_val
             is_pass = (avg_val <= cfg.max_threshold) and (max_val <= cfg.max_threshold)
 
+        week_total = sales_7d_count(sales_metrics, cfg.sale_count_mode)
+        notes = (f"Avg={avg_val:.2f}, Max={max_val}, 7d_total={sales_metrics.seven_day_sales_transactions} "
+                 f"txs across 7 complete calendar days.")
+        if cfg.min_sales_7d > 0:
+            threshold += f" and >= {cfg.min_sales_7d} sales in 7 days"
+            if week_total < cfg.min_sales_7d:
+                is_pass = False
+                notes = too_few_sales_reason(week_total, cfg.min_sales_7d) + ". " + notes
+
         return FilterCriterionResult(
             name="trading_frequency",
             threshold=threshold,
@@ -271,7 +280,7 @@ class FilterEngine:
             data_quality=DataQualityState.AVAILABLE,
             timestamp=now_iso,
             source=source,
-            notes=f"Avg={avg_val:.2f}, Max={max_val}, 7d_total={sales_metrics.seven_day_sales_transactions} txs across 7 complete calendar days.",
+            notes=notes,
         )
 
     def _eval_floor_change_1d(self, floor_metrics: FloorPriceMetrics, now_iso: str) -> FilterCriterionResult:
@@ -465,3 +474,16 @@ class FilterEngine:
             source=source,
             notes=f"Estimated net profit {mod.estimated_net_profit:.4f} {trade_economics.currency} on entry {mod.modelled_entry_offer:.4f}.",
         )
+
+
+def sales_7d_count(sales_metrics: SalesMetrics, sale_count_mode: str) -> int:
+    """Sales in the 7 complete calendar days, counted the same way as the trading-pace limit."""
+    if sale_count_mode == "transactions":
+        return int(sales_metrics.seven_day_sales_transactions or 0)
+    return int(sales_metrics.seven_day_sales_items or 0)
+
+
+def too_few_sales_reason(week_total: int, minimum: int) -> str:
+    if week_total == 0:
+        return "No sales in the last 7 days"
+    return f"Only {week_total} sales in the last 7 days (needs at least {minimum})"

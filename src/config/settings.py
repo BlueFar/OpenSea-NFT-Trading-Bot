@@ -47,6 +47,7 @@ class TradingFrequencyFilterConfig(BaseModel):
     enabled: bool = True
     metric: str = "average_daily_sales"  # Options: average_daily_sales, max_daily_sales, both
     max_threshold: float = 2.0
+    min_sales_7d: int = 1  # At least this many sales in the last 7 days (0 = off)
     sale_count_mode: str = "transactions"  # Options: transactions, item_quantity
 
 class FloorChangeFilterConfig(BaseModel):

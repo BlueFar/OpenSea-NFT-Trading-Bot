@@ -179,6 +179,32 @@ h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
   text-align: left; padding: 16px; display: flex; flex-direction: column; gap: 14px; border: 1px solid var(--line);
   transition: transform .15s, box-shadow .15s, border-color .15s;
 }
+.cand { cursor: pointer; }
+.cand:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cand-tools { display: grid; gap: 10px; margin-bottom: 14px; }
+.cand-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.cand-bar .field { color: var(--fg); }
+.cand-bar select { padding: 7px 8px; font-size: 13.5px; }
+.cand-bar .count { background: var(--accent); color: var(--accent-fg); border-radius: 99px; font-size: 11.5px; padding: 0 7px; line-height: 18px; }
+.cand-filters { padding: 14px 16px; display: grid; gap: 12px; }
+.cand-filters[hidden] { display: none; }
+.cand-filters .chart-note { margin: 0; }
+.filter-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 170px), 1fr)); gap: 12px 16px; }
+.filter-grid .field { flex-direction: column; align-items: stretch; gap: 4px; font-size: 12.5px; }
+.filter-grid .in { display: flex; align-items: center; gap: 5px; color: var(--muted); }
+.filter-grid input { width: 100%; text-align: left; }
+.filter-chains { display: grid; gap: 6px; font-size: 12.5px; }
+.grid-group { grid-column: 1 / -1; font-size: 13px; color: var(--muted); font-weight: 600; margin: 6px 0 -4px; }
+.grid-group:first-child { margin-top: 0; }
+.field-stack { display: grid; gap: 6px; justify-items: end; }
+.gas-usd { min-width: 64px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.usd { border-bottom: 1px dotted color-mix(in srgb, var(--muted) 70%, transparent); cursor: help; }
+.usd:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 3px; }
+.usd-tip {
+  position: fixed; z-index: 60; max-width: 260px; padding: 8px 11px; border-radius: 8px; background: var(--fg); color: var(--bg);
+  font-size: 12.5px; line-height: 1.5; box-shadow: var(--shadow); pointer-events: none; font-variant-numeric: tabular-nums;
+}
+.usd-tip .usd-src { opacity: .7; font-size: 11.5px; }
 .cand:hover { transform: translateY(-2px); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
 .cand-head { display: flex; gap: 12px; align-items: center; min-width: 0; }
 .art { width: 48px; height: 48px; border-radius: 10px; flex: none; overflow: hidden; display: block; }
