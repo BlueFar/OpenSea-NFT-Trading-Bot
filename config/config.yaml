@@ -14,17 +14,26 @@ discovery:
   max_depth_pages: 20               # Restart each chain's crawl from the top after N pages (0 = crawl to the end)
   enable_top: false                 # Supplementary GET /api/v2/collections/top (not a documented v2 endpoint)
   enable_trending: false            # Supplementary GET /api/v2/collections/trending (not a documented v2 endpoint)
-  chains: ["ethereum", "base", "polygon"]
+  # Every OpenSea NFT chain except Solana (see src/config/chains.py). Turn chains on/off in the dashboard.
+  chains: ["ethereum", "base", "polygon", "arbitrum", "optimism", "zora", "blast", "abstract", "robinhood",
+           "shape", "unichain", "soneium", "ink", "megaeth", "ape_chain", "ronin", "avalanche", "sei",
+           "bera_chain", "flow", "gunzilla", "hyperevm", "somnia", "monad", "animechain", "arc", "stablechain"]
+  skip_unverified: true             # Don't evaluate collections whose discovery listing shows no blue tick
   watchlist: []                     # Optional explicit slugs to monitor
 
+# Every rule has "enabled". A switched-off rule is still measured and shown, but never rejects.
+# The dashboard's Settings page saves changes to config/overrides.yaml, which overrides this file.
 filters:
   trading_frequency:
+    enabled: true
     metric: "average_daily_sales"   # Options: average_daily_sales, max_daily_sales, both
     max_threshold: 2.0
     sale_count_mode: "transactions" # Options: transactions (default), item_quantity
   floor_change_1d:
+    enabled: true
     max_change_pct: 8.0             # Requirement: < 8.0%
   floor_change_7d:
+    enabled: true
     max_change_pct: 10.0            # Requirement: < 10.0%
   offer_to_floor:
     enabled: true
@@ -37,16 +46,21 @@ filters:
     enabled: true
     min_net_roi_pct: 10.0           # Modelled net ROI after marketplace fee, royalty and gas
   listed_items:
+    enabled: true
     max_listed_pct: 6.0             # Requirement: < 6.0%
   verification:
+    enabled: true
     required_status: ["verified"]   # Specifically blue checkmark
   project_age:
+    enabled: true
     min_age_days: 60.0              # Requirement: > 60.0 days (OpenSea Collection Age)
 
 trade_model:
   entry_offer_premium_pct: 1.0      # Model assumption: bid placed 1.0% above observed top collection offer
   target_sale_discount_from_floor_pct: 5.0 # Model assumption: exit discount below floor
-  gas_estimate_eth: 0.005           # Model assumption: gas costs in ETH
+  gas_estimate_eth: 0.005           # Model assumption: gas per trade on Ethereum, in ETH
+  chain_gas: {}                     # Per-chain gas in that chain's coin, e.g. {base: 0.0002, ape_chain: 0.05}.
+                                    # Chains not listed use the defaults in src/config/chains.py.
   # Used only when collection metadata does not list the OpenSea fee; labelled CONFIGURED in Info.md.
   # Set this to OpenSea's current marketplace fee. Remove (null) to mark such collections INCOMPLETE instead.
   marketplace_fee_pct: 1.0
@@ -58,6 +72,10 @@ floor_history:
   one_day_tolerance_hours: 6.0
   seven_day_tolerance_hours: 24.0
   use_provider_endpoint: true       # Also try /collections/{slug}/floor_prices when no snapshot exists
+  # After downtime (e.g. a power cut) there may be no snapshot inside the normal window. Then the nearest
+  # snapshot within these wider windows is used, and Info.md says so under "Data Notes".
+  gap_fallback_1d_hours: 12.0
+  gap_fallback_7d_hours: 48.0
 
 scheduler:
   discovery_interval_seconds: 3600  # Progressive catalog crawl cadence
@@ -67,3 +85,10 @@ scheduler:
   request_delay_seconds: 0.5        # Polite spacing between API calls
   rate_limit_backoff_factor: 2.0
   max_retries: 5
+
+runtime:
+  wait_for_internet: true           # Pause while offline instead of marking collections as failed
+  connectivity_host: "api.opensea.io"
+  offline_check_seconds: 30
+  notify_new_candidates: true       # macOS notification when a new candidate is found
+  notification_sound: false

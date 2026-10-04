@@ -1,5 +1,5 @@
 import time
-from typing import List, Optional, Tuple, Dict, Any
+from typing import Callable, List, Optional, Tuple, Dict, Any
 from ..base import CollectionDataProvider
 from .client import OpenSeaClient
 from .parser import (
@@ -31,6 +31,8 @@ class OpenSeaProvider(CollectionDataProvider):
     def __init__(self, client: OpenSeaClient):
         self.client = client
         self._cache: Dict[str, Tuple[float, Any]] = {}
+        # slug -> {"chain", "safelist_status"} from the most recent discovery page
+        self.last_discovery_meta: Dict[str, Dict[str, Optional[str]]] = {}
 
     def _get_cache(self, key: str, ttl: float) -> Optional[Any]:
         if key in self._cache:
@@ -115,12 +117,20 @@ class OpenSeaProvider(CollectionDataProvider):
         slug: str,
         after_timestamp: int,
         max_pages: int = 20,
+        stop_above: Optional[float] = None,
+        count_before_ts: Optional[int] = None,
+        count_mode: str = "transactions",
     ) -> Optional[List[SaleEvent]]:
         """
         Fetches sale events occurring after the given timestamp.
         Returns None if the API request fails, preventing false zero-sales counts.
+        If stop_above is set, paging stops once more than stop_above sales (distinct transactions,
+        or items in "item_quantity" mode) fall before count_before_ts: the collection already
+        trades too often, so the remaining pages cannot change the verdict.
         """
         all_events = []
+        counted_tx = set()
+        counted_items = 0
         next_cursor = None
         seen_cursors = set()
 
@@ -146,6 +156,19 @@ class OpenSeaProvider(CollectionDataProvider):
 
             events = parse_sale_events(data)
             all_events.extend(events)
+
+            if stop_above is not None:
+                for ev in events:
+                    if count_before_ts is not None and ev.event_timestamp > count_before_ts:
+                        continue
+                    if ev.event_timestamp < after_timestamp:
+                        continue
+                    counted_tx.add(ev.transaction or ev.order_hash or ev.event_id)
+                    counted_items += max(1, ev.quantity)
+                counted = counted_items if count_mode == "item_quantity" else len(counted_tx)
+                if counted > stop_above:
+                    logger.debug("Collection %s has more than %s sales in the window. Stopping early.", slug, stop_above)
+                    break
 
             next_cursor = data.get("next")
             if not next_cursor:
@@ -204,11 +227,13 @@ class OpenSeaProvider(CollectionDataProvider):
 
         return total_count, False
 
-    def get_top_offer(self, slug: str) -> Optional[Offer]:
+    def get_top_offer(self, slug: str, currency_filter: Optional[Callable[[str], bool]] = None) -> Optional[Offer]:
         """
         Fetches the highest active collection offer (per NFT) for a collection.
         Uses collection-wide offers only: item and trait offers on single rare NFTs
         are not a price you can bid against for an arbitrary floor item.
+        currency_filter keeps only offers in a currency comparable to the floor, so e.g.
+        500 WPOL never outranks 0.2 WETH.
         """
         offers: List[Offer] = []
         next_cursor = None
@@ -228,6 +253,8 @@ class OpenSeaProvider(CollectionDataProvider):
             if not next_cursor:
                 break
 
+        if currency_filter is not None:
+            offers = [o for o in offers if currency_filter(o.price_currency)]
         if not offers:
             return None
 
@@ -261,6 +288,13 @@ class OpenSeaProvider(CollectionDataProvider):
                 slug = c.get("collection") or c.get("slug")
                 if slug:
                     slugs.append(slug)
+                    self.last_discovery_meta[slug] = {
+                        "chain": c.get("chain") or next(
+                            (k.get("chain") for k in c.get("contracts") or [] if isinstance(k, dict) and k.get("chain")),
+                            chain,
+                        ),
+                        "safelist_status": c.get("safelist_status"),
+                    }
 
         next_cursor = data.get("next")
         return slugs, next_cursor

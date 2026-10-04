@@ -97,6 +97,25 @@ cp .env.example .env
 # OPENSEA_API_KEY=your_key_here
 ```
 
+### Running on a Mac (recommended)
+See **[docs/MAC_SETUP.md](docs/MAC_SETUP.md)**: iMac power settings, install, and `python bot.py install-autostart`
+so the dashboard opens at login and keeps the bot running after power cuts and crashes.
+
+### Dashboard
+```bash
+python bot.py ui            # http://127.0.0.1:5050
+```
+Pages: Home (status, checks today, rejection funnel, activity), Candidates, Near misses,
+Check a collection, and Settings. Settings switches each rule on or off (a switched-off rule is still
+measured but never rejects), edits limits, trade model, chains and per-chain gas. Changes are saved to
+`config/overrides.yaml`, which overrides `config/config.yaml`, and the running bot picks them up at its next check.
+
+### Chains
+The bot scans the 27 OpenSea NFT chains listed in `src/config/chains.py` (every chain except Solana).
+Each chain has its own currency group (a coin and its wrapped form count as the same, e.g. APE/WAPE)
+and a default gas per trade in its own coin. Collections priced in a currency that doesn't match the
+top offer's (e.g. USDG items with WETH offers) fail closed.
+
 ### Running the Bot
 
 #### Continuous 24/7 Daemon

@@ -1,110 +1,99 @@
 import os
-import sys
 import json
-import time
-import signal
-import subprocess
-from typing import Dict, Any, Optional
+import threading
+from datetime import timedelta
+from typing import Dict, Any, Optional, List
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
-from ..config.settings import load_config, BotConfig
+import yaml
+
+from ..config.settings import load_config, BotConfig, overrides_path_for, deep_merge
+from ..config.chains import CHAINS, ALL_CHAIN_IDS
 from ..storage.state_store import StateStore
-from ..providers.opensea.client import OpenSeaClient
+from ..providers.opensea.client import OpenSeaClient, OpenSeaNetworkError
 from ..providers.opensea.provider import OpenSeaProvider
 from ..collectors.orchestrator import CollectionEvaluator
+from ..runtime import control, launchd
+from ..runtime.control import BotProcessManager, PID_FILE, LOG_FILE, WORKSPACE_ROOT  # noqa: F401 (re-exported)
 from ..utils.logging import setup_logger
+from ..utils.time import now_local
 
 logger = setup_logger("dashboard_server")
 
-WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
-PID_FILE = os.path.join(WORKSPACE_ROOT, "state", "bot.pid")
-LOG_FILE = os.path.join(WORKSPACE_ROOT, "bot.log")
+STATIC_FILES = {
+    "/": ("index.html", "text/html; charset=utf-8"),
+    "/index.html": ("index.html", "text/html; charset=utf-8"),
+    "/static/app.css": ("app.css", "text/css; charset=utf-8"),
+    "/static/app.js": ("app.js", "application/javascript; charset=utf-8"),
+}
 
-class BotProcessManager:
-    """Manages spawning, PID tracking, and graceful termination of the bot daemon."""
+# Rule key -> (config attribute holding the limit, or None for yes/no rules)
+RULE_LIMIT_FIELDS = {
+    "verification": None,
+    "project_age": "min_age_days",
+    "listed_items": "max_listed_pct",
+    "trading_frequency": "max_threshold",
+    "floor_change_1d": "max_change_pct",
+    "floor_change_7d": "max_change_pct",
+    "offer_to_floor": "min_ratio_pct",
+    "net_profit": "min_net_roi_pct",
+}
 
-    @staticmethod
-    def get_running_pid() -> Optional[int]:
-        if not os.path.exists(PID_FILE):
-            return None
-        try:
-            with open(PID_FILE, "r") as f:
-                pid = int(f.read().strip())
-            # Check if process is actually running
-            os.kill(pid, 0)
-            return pid
-        except (ValueError, OSError):
-            # Process does not exist or stale PID file
-            if os.path.exists(PID_FILE):
-                try:
-                    os.remove(PID_FILE)
-                except OSError:
-                    pass
-            return None
 
-    @staticmethod
-    def start_bot(config_path: str = "config/config.yaml", dry_run: bool = False) -> Dict[str, Any]:
-        current_pid = BotProcessManager.get_running_pid()
-        if current_pid is not None:
-            return {"success": False, "error": f"Bot is already running (PID {current_pid})", "pid": current_pid}
+def _telemetry_value(telemetry: Dict[str, Any], key: str) -> Any:
+    raw = (telemetry.get(key) or {}).get("value")
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return raw
 
-        cmd = [sys.executable, "bot.py", "--config", config_path]
-        if dry_run:
-            cmd.append("--dry-run")
 
-        log_fp = open(LOG_FILE, "a", encoding="utf-8")
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=WORKSPACE_ROOT,
-                stdout=log_fp,
-                stderr=subprocess.STDOUT,
-                preexec_fn=os.setsid if hasattr(os, "setsid") else None,
-            )
-            with open(PID_FILE, "w") as f:
-                f.write(str(proc.pid))
-            logger.info("Started bot daemon with PID %d", proc.pid)
-            return {"success": True, "pid": proc.pid, "dry_run": dry_run}
-        except Exception as e:
-            logger.error("Failed to start bot daemon: %s", e)
-            return {"success": False, "error": str(e)}
+def _leaf_paths(d: Dict[str, Any], prefix=()) -> List[tuple]:
+    out = []
+    for k, v in d.items():
+        p = prefix + (k,)
+        if isinstance(v, dict) and k != "chain_gas":
+            out.extend(_leaf_paths(v, p))
+        else:
+            out.append(p)
+    return out
 
-    @staticmethod
-    def stop_bot() -> Dict[str, Any]:
-        pid = BotProcessManager.get_running_pid()
-        if pid is None:
-            return {"success": True, "message": "Bot is not running", "status": "STOPPED"}
 
-        try:
-            logger.info("Sending SIGINT to bot process PID %d", pid)
-            os.kill(pid, signal.SIGINT)
+def _delete_path(d: Dict[str, Any], keys: tuple) -> None:
+    for k in keys[:-1]:
+        d = d.get(k)
+        if not isinstance(d, dict):
+            return
+    d.pop(keys[-1], None)
 
-            # Wait up to 5 seconds for graceful shutdown
-            for _ in range(50):
-                time.sleep(0.1)
-                try:
-                    os.kill(pid, 0)
-                except OSError:
-                    # Process exited
-                    break
-            else:
-                # Force kill if still alive
-                logger.warning("Bot PID %d did not terminate on SIGINT. Sending SIGTERM...", pid)
-                os.kill(pid, signal.SIGTERM)
-                time.sleep(0.5)
 
-            if os.path.exists(PID_FILE):
-                try:
-                    os.remove(PID_FILE)
-                except OSError:
-                    pass
+def _prune_same(new: Dict[str, Any], base: Dict[str, Any]) -> Dict[str, Any]:
+    """Keeps only values that differ from base. chain_gas is compared per chain."""
+    out: Dict[str, Any] = {}
+    for k, v in new.items():
+        b = base.get(k) if isinstance(base, dict) else None
+        if isinstance(v, dict):
+            sub = _prune_same(v, b if isinstance(b, dict) else {})
+            if sub:
+                out[k] = sub
+        elif isinstance(v, float) and isinstance(b, (int, float)) and abs(v - b) < 1e-12:
+            continue
+        elif v != b:
+            out[k] = v
+    return out
 
-            return {"success": True, "status": "STOPPED", "pid": pid}
-        except Exception as e:
-            logger.error("Error stopping bot PID %d: %s", pid, e)
-            return {"success": False, "error": str(e)}
+
+def _drop_empty(d: Dict[str, Any]) -> None:
+    for k in list(d.keys()):
+        if isinstance(d[k], dict):
+            _drop_empty(d[k])
+            if not d[k]:
+                del d[k]
+
 
 class DashboardRequestHandler(BaseHTTPRequestHandler):
     """HTTP Request Handler providing REST endpoints and serving static UI assets."""
@@ -112,17 +101,21 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
     config: BotConfig
     state_store: StateStore
     evaluator: CollectionEvaluator
+    config_path: str = "config/config.yaml"
 
     def log_message(self, format, *args):
         # Suppress verbose standard HTTP server logging in production
         return
 
+    # ------------------------------------------------------------------
+    # Plumbing
+    # ------------------------------------------------------------------
     def _send_json(self, data: Any, status: int = 200):
-        body = json.dumps(data, indent=2).encode("utf-8")
+        body = json.dumps(data, indent=2, default=str).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -143,8 +136,24 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(data)
+
+    def _read_json_body(self) -> Dict[str, Any]:
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        if length <= 0:
+            return {}
+        try:
+            return json.loads(self.rfile.read(length).decode("utf-8")) or {}
+        except (ValueError, UnicodeDecodeError):
+            return {}
+
+    def _today(self) -> str:
+        return now_local(self.config.general.bot_timezone).strftime("%Y-%m-%d")
+
+    def _days_ago(self, n: int) -> str:
+        return (now_local(self.config.general.bot_timezone).date() - timedelta(days=n)).strftime("%Y-%m-%d")
 
     def do_HEAD(self):
         self.do_GET()
@@ -154,58 +163,69 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         path = parsed.path
         query = parse_qs(parsed.query)
 
-        # -------------------------------------------------------------
-        # API Routes
-        # -------------------------------------------------------------
-        if path == "/api/status":
-            self._handle_get_status()
-        elif path == "/api/collections":
-            self._handle_get_collections(query)
-        elif path == "/api/candidates":
-            self._handle_get_candidates()
-        elif path == "/api/candidate/dossier":
-            self._handle_get_candidate_dossier(query)
-        elif path == "/api/inspect":
-            self._handle_inspect_collection(query)
-        elif path == "/api/logs":
-            self._handle_get_logs(query)
-        # -------------------------------------------------------------
-        # Static Assets
-        # -------------------------------------------------------------
-        elif path in ("/", "/index.html"):
-            self._send_file(os.path.join(STATIC_DIR, "index.html"), "text/html; charset=utf-8")
-        elif path == "/static/app.css":
-            self._send_file(os.path.join(STATIC_DIR, "app.css"), "text/css; charset=utf-8")
-        elif path == "/static/app.js":
-            self._send_file(os.path.join(STATIC_DIR, "app.js"), "application/javascript; charset=utf-8")
+        routes = {
+            "/api/status": lambda: self._handle_get_status(),
+            "/api/overview": lambda: self._handle_get_overview(),
+            "/api/collections": lambda: self._handle_get_collections(query),
+            "/api/candidates": lambda: self._handle_get_candidates(query),
+            "/api/candidate": lambda: self._handle_get_candidate(query),
+            "/api/candidate/dossier": lambda: self._handle_get_candidate_dossier(query),
+            "/api/near-misses": lambda: self._handle_get_near_misses(),
+            "/api/inspect": lambda: self._handle_inspect_collection(query),
+            "/api/settings": lambda: self._handle_get_settings(),
+            "/api/logs": lambda: self._handle_get_logs(query),
+        }
+        if path in routes:
+            routes[path]()
+        elif path in STATIC_FILES:
+            name, ctype = STATIC_FILES[path]
+            self._send_file(os.path.join(STATIC_DIR, name), ctype)
         else:
             self._send_text("Not Found", status=404)
 
     def do_POST(self):
-        parsed = urlparse(self.path)
-        path = parsed.path
-
+        path = urlparse(self.path).path
         if path == "/api/bot/start":
             self._handle_start_bot()
         elif path == "/api/bot/stop":
             self._handle_stop_bot()
+        elif path == "/api/settings":
+            self._handle_save_settings()
         else:
             self._send_text("Not Found", status=404)
 
-    def _handle_get_status(self):
+    # ------------------------------------------------------------------
+    # Status & overview
+    # ------------------------------------------------------------------
+    def _run_state(self, summary: Dict[str, Any]) -> Dict[str, Any]:
         pid = BotProcessManager.get_running_pid()
-        summary = self.state_store.get_status_summary()
+        desired = control.read_desired_state()
+        telemetry = summary.get("telemetry", {})
+        status = _telemetry_value(telemetry, "bot_status")
+        if pid is not None:
+            state = "paused" if status == "PAUSED_OFFLINE" else "running"
+        elif desired["run"]:
+            state = "starting"
+        else:
+            state = "stopped"
+        return {"state": state, "pid": pid, "desired_run": desired["run"], "dry_run": desired["dry_run"],
+                "desired_updated_at": desired["updated_at"]}
 
+    def _handle_get_status(self):
+        summary = self.state_store.get_status_summary()
+        run = self._run_state(summary)
+        pid = run["pid"]
         uptime_seconds = None
         if pid and os.path.exists(PID_FILE):
             try:
+                import time
                 uptime_seconds = int(time.time() - os.path.getmtime(PID_FILE))
             except Exception:
                 pass
-
-        data = {
+        self._send_json({
             "is_running": pid is not None,
             "status": "RUNNING" if pid else "STOPPED",
+            "state": run["state"],
             "pid": pid,
             "uptime_seconds": uptime_seconds,
             "total_candidates": summary.get("total_candidates_found", 0),
@@ -213,37 +233,87 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             "checkpoints": summary.get("checkpoints", {}),
             "telemetry": summary.get("telemetry", {}),
             "bot_timezone": self.config.general.bot_timezone,
-        }
-        self._send_json(data)
+        })
 
+    def _handle_get_overview(self):
+        import time
+        store, cfg = self.state_store, self.config
+        summary = store.get_status_summary()
+        telemetry = summary.get("telemetry", {})
+        run = self._run_state(summary)
+        since7 = self._days_ago(6)
+
+        oldest = store.get_oldest_floor_snapshot_ts()
+        history_days = max(0.0, (time.time() - oldest) / 86400.0) if oldest else 0.0
+        ready_on = None
+        if history_days < 7:
+            base = oldest or time.time()
+            ready_on = time.strftime("%Y-%m-%d", time.localtime(base + 7 * 86400))
+
+        recent = store.get_results_since(self._days_ago(0), limit=25)
+        verification = cfg.filters.verification
+        self._send_json({
+            **run,
+            "started_at": _telemetry_value(telemetry, "started_at"),
+            "last_check_at": _telemetry_value(telemetry, "last_evaluation_time"),
+            "offline_since": _telemetry_value(telemetry, "offline_since"),
+            "checked_today": store.count_results_on(self._today()),
+            "shortlisted": store.count_shortlisted(),
+            "candidates_7d": len(store.get_results_since(since7, passes_only=True)),
+            "universe": summary.get("total_monitored_collections", 0),
+            "skipped_unverified": store.count_skipped_unverified(verification.required_status)
+            if cfg.discovery.skip_unverified and verification.enabled else 0,
+            "chains_enabled": len(cfg.discovery.chains),
+            "chain_counts": store.count_by_chain(),
+            "floor_history": {"days": round(history_days, 2), "ready": history_days >= 7, "ready_on": ready_on},
+            "funnel": store.get_rejection_funnel(since7),
+            "events": store.get_recent_events(20),
+            "recent_results": recent,
+            "rules_enabled": {k: bool(getattr(getattr(cfg.filters, k), "enabled", True)) for k in RULE_LIMIT_FIELDS},
+            "limits": self._limits(),
+            "timezone": cfg.general.bot_timezone,
+            "autostart_installed": launchd.is_installed(),
+        })
+
+    def _limits(self) -> Dict[str, Any]:
+        out = {}
+        for key, field in RULE_LIMIT_FIELDS.items():
+            out[key] = getattr(getattr(self.config.filters, key), field) if field else None
+        return out
+
+    # ------------------------------------------------------------------
+    # Bot control
+    # ------------------------------------------------------------------
     def _handle_start_bot(self):
-        content_length = int(self.headers.get("Content-Length", 0))
-        dry_run = False
-        if content_length > 0:
-            try:
-                payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
-                dry_run = bool(payload.get("dry_run", False))
-            except Exception:
-                pass
-
-        result = BotProcessManager.start_bot(dry_run=dry_run)
+        payload = self._read_json_body()
+        dry_run = bool(payload.get("dry_run", False))
+        control.write_desired_state(True, dry_run=dry_run)
+        result = BotProcessManager.start_bot(config_path=self.config_path, dry_run=dry_run)
+        if not result.get("success") and result.get("pid"):
+            result = {"success": True, "pid": result["pid"], "message": "Bot was already running"}
         self._send_json(result, status=200 if result.get("success") else 400)
 
     def _handle_stop_bot(self):
+        control.write_desired_state(False)
         result = BotProcessManager.stop_bot()
         self._send_json(result, status=200 if result.get("success") else 500)
 
+    # ------------------------------------------------------------------
+    # Collections, candidates, near misses
+    # ------------------------------------------------------------------
     def _handle_get_collections(self, query):
         search = query.get("q", [None])[0]
         limit = int(query.get("limit", [100])[0])
         collections = self.state_store.get_all_monitored_collections(search=search, limit=limit)
         self._send_json({"collections": collections, "count": len(collections)})
 
-    def _handle_get_candidates(self):
-        """Scans the filesystem data directory and merges with candidate history."""
+    def _handle_get_candidates(self, query):
+        """Candidates from the bot's records (with details) plus Info.md folders found on disk."""
+        days = max(1, min(90, int(query.get("days", [7])[0])))
+        items = self.state_store.get_results_since(self._days_ago(days - 1), passes_only=True)
+
         data_root = os.path.abspath(self.config.general.data_root)
         candidates = []
-
         if os.path.exists(data_root):
             for day in sorted(os.listdir(data_root), reverse=True):
                 day_path = os.path.join(data_root, day)
@@ -262,12 +332,36 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                             "modified_at": os.path.getmtime(info_path),
                         })
 
-        history = self.state_store.get_all_candidates_history(limit=50)
         self._send_json({
+            "items": items,
             "candidates": candidates,
             "count": len(candidates),
-            "history": history,
+            "history": self.state_store.get_all_candidates_history(limit=50),
         })
+
+    def _safe_info_md(self, path: Optional[str]) -> Optional[str]:
+        """Reads an Info.md only if it lives inside the data folder."""
+        if not path:
+            return None
+        root = os.path.realpath(self.config.general.data_root)
+        real = os.path.realpath(path)
+        if not real.startswith(root + os.sep) or os.path.basename(real) != "Info.md" or not os.path.exists(real):
+            return None
+        with open(real, "r", encoding="utf-8") as f:
+            return f.read()
+
+    def _handle_get_candidate(self, query):
+        slug = (query.get("slug", [""])[0] or "").strip()
+        date_str = query.get("date", [None])[0]
+        if not slug:
+            self._send_json({"error": "Missing 'slug'"}, status=400)
+            return
+        result = self.state_store.get_result(slug, date_str)
+        if not result:
+            self._send_json({"error": "Not found"}, status=404)
+            return
+        result["info_md_content"] = self._safe_info_md((result.get("details") or {}).get("info_md"))
+        self._send_json(result)
 
     def _handle_get_candidate_dossier(self, query):
         date_str = query.get("date", [None])[0]
@@ -290,11 +384,39 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         with open(info_path, "r", encoding="utf-8") as f:
             content = f.read()
 
-        self._send_json({
-            "date": date_str,
-            "project": folder_name,
-            "content": content,
-        })
+        self._send_json({"date": date_str, "project": folder_name, "content": content})
+
+    def _handle_get_near_misses(self):
+        """
+        Near misses: the latest result per collection in the last 7 days that failed a numeric rule
+        (switched on) by at most 50% of its limit, closest first. Early exits stop at the first failed
+        rule, so later rules were not checked for those.
+        """
+        rows = self.state_store.get_results_since(self._days_ago(6))
+        seen, near, waiting = set(), [], []
+        enabled = {k: bool(getattr(getattr(self.config.filters, k), "enabled", True)) for k in RULE_LIMIT_FIELDS}
+        for r in rows:  # newest first
+            if r["slug"] in seen:
+                continue
+            seen.add(r["slug"])
+            if r["is_pass"]:
+                continue
+            d = r.get("details") or {}
+            rule = r.get("reject_filter") or d.get("rule")
+            if rule and rule.startswith("floor_history"):
+                waiting.append(r)
+                continue
+            value, limit, kind = d.get("value"), d.get("limit"), d.get("kind")
+            if rule not in enabled or not enabled[rule] or kind not in ("max", "min"):
+                continue
+            if not isinstance(value, (int, float)) or not isinstance(limit, (int, float)) or limit <= 0:
+                continue
+            closeness = abs(value - limit) / limit
+            if closeness <= 0.5:
+                r["closeness"] = closeness
+                near.append(r)
+        near.sort(key=lambda r: r["closeness"])
+        self._send_json({"near": near[:40], "waiting": waiting[:40]})
 
     def _handle_inspect_collection(self, query):
         slug = query.get("slug", [None])[0]
@@ -302,17 +424,19 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "Missing 'slug' parameter"}, status=400)
             return
 
-        slug = slug.strip().lower()
+        slug = slug.strip()
         if "opensea.io/collection/" in slug:
-            slug = slug.split("opensea.io/collection/")[-1].strip("/?# ")
+            slug = slug.split("opensea.io/collection/")[-1]
+        slug = slug.split("?")[0].split("#")[0].strip("/ ").lower()
 
         try:
+            self.evaluator.last_details = None
             report = self.evaluator.evaluate_collection(slug=slug, dry_run=True, stop_on_first_failure=False)
             if not report:
                 self._send_json({
                     "slug": slug,
                     "evaluated": False,
-                    "error": f"Could not retrieve metadata for collection '{slug}' from OpenSea.",
+                    "error": f"Could not find '{slug}' on OpenSea.",
                 }, status=404)
                 return
 
@@ -327,19 +451,175 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     "formula": crit.formula,
                     "notes": crit.notes,
                     "data_quality": crit.data_quality.value,
+                    "enabled": self.evaluator.filter_engine.is_enabled(name),
                 }
 
+            details = self.evaluator.last_details if isinstance(getattr(self.evaluator, "last_details", None), dict) else None
             self._send_json({
                 "slug": slug,
                 "evaluated": True,
                 "is_overall_pass": report.is_overall_pass,
                 "rejection_reasons": report.rejection_reasons,
                 "criteria": criteria_data,
+                "details": details,
             })
+        except OpenSeaNetworkError:
+            self._send_json({"slug": slug, "evaluated": False, "error": "OpenSea can't be reached. Check the internet connection."}, status=503)
         except Exception as e:
             logger.error("Error inspecting collection %s: %s", slug, e)
             self._send_json({"slug": slug, "evaluated": False, "error": str(e)}, status=500)
 
+    # ------------------------------------------------------------------
+    # Settings (saved to config/overrides.yaml; config.yaml keeps its comments)
+    # ------------------------------------------------------------------
+    def _settings_payload(self) -> Dict[str, Any]:
+        cfg = self.config
+        rules = {}
+        for key, field in RULE_LIMIT_FIELDS.items():
+            rc = getattr(cfg.filters, key)
+            rules[key] = {"enabled": bool(getattr(rc, "enabled", True)), "value": getattr(rc, field) if field else None}
+        tm = cfg.trade_model
+        enabled = set(cfg.discovery.chains)
+        chains = []
+        for c in CHAINS:
+            default_gas = tm.gas_estimate_eth if c.id == "ethereum" else c.gas
+            chains.append({
+                "id": c.id, "name": c.name, "coin": c.native, "kind": c.kind,
+                "enabled": c.id in enabled,
+                "gas": tm.chain_gas.get(c.id, default_gas), "default_gas": default_gas,
+            })
+        return {
+            "rules": rules,
+            "trade": {"bid": tm.entry_offer_premium_pct, "sell": tm.target_sale_discount_from_floor_pct,
+                      "fee": tm.marketplace_fee_pct},
+            "chains": chains,
+            "skip_unverified": cfg.discovery.skip_unverified,
+            "runtime": {
+                "wait_for_internet": cfg.runtime.wait_for_internet,
+                "notify_new_candidates": cfg.runtime.notify_new_candidates,
+                "notification_sound": cfg.runtime.notification_sound,
+            },
+            "autostart": {"installed": launchd.is_installed()},
+        }
+
+    def _handle_get_settings(self):
+        self._send_json(self._settings_payload())
+
+    @staticmethod
+    def _number(v: Any, name: str) -> float:
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} must be a number")
+        if f < 0 or f != f:
+            raise ValueError(f"{name} can't be negative")
+        return f
+
+    def _overrides_from_payload(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        filters: Dict[str, Any] = {}
+        for key, rule in (p.get("rules") or {}).items():
+            if key not in RULE_LIMIT_FIELDS:
+                raise ValueError(f"Unknown rule '{key}'")
+            entry: Dict[str, Any] = {}
+            if "enabled" in rule:
+                entry["enabled"] = bool(rule["enabled"])
+            field = RULE_LIMIT_FIELDS[key]
+            if field and rule.get("value") is not None:
+                entry[field] = self._number(rule["value"], key)
+            filters[key] = entry
+        if filters:
+            out["filters"] = filters
+
+        trade = p.get("trade") or {}
+        tm: Dict[str, Any] = {}
+        for src, dst in (("bid", "entry_offer_premium_pct"), ("sell", "target_sale_discount_from_floor_pct"),
+                         ("fee", "marketplace_fee_pct")):
+            if trade.get(src) is not None:
+                tm[dst] = self._number(trade[src], src)
+
+        chains = p.get("chains")
+        if chains is not None:
+            ids = [c["id"] for c in chains if c.get("enabled")]
+            unknown = [i for i in ids if i not in ALL_CHAIN_IDS]
+            if unknown:
+                raise ValueError(f"Unknown chain(s): {', '.join(unknown)}")
+            out.setdefault("discovery", {})["chains"] = ids
+            gas = {c["id"]: self._number(c["gas"], f"gas for {c['id']}") for c in chains
+                   if c.get("gas") is not None and c["id"] in ALL_CHAIN_IDS}
+            if gas:
+                tm["chain_gas"] = gas
+                if "ethereum" in gas:
+                    tm["gas_estimate_eth"] = gas["ethereum"]
+        if tm:
+            out["trade_model"] = tm
+        if p.get("skip_unverified") is not None:
+            out.setdefault("discovery", {})["skip_unverified"] = bool(p["skip_unverified"])
+
+        rt = p.get("runtime") or {}
+        rto = {k: bool(rt[k]) for k in ("wait_for_internet", "notify_new_candidates", "notification_sound") if k in rt}
+        if rto:
+            out["runtime"] = rto
+        return out
+
+    def _base_values(self) -> Dict[str, Any]:
+        """config.yaml without dashboard overrides, with each chain's effective default gas filled in."""
+        base = load_config(self.config_path, use_overrides=False)
+        d = base.model_dump()
+        gas = dict(base.trade_model.chain_gas)
+        for c in CHAINS:
+            gas.setdefault(c.id, base.trade_model.gas_estimate_eth if c.id == "ethereum" else c.gas)
+        d["trade_model"]["chain_gas"] = gas
+        return d
+
+    def _handle_save_settings(self):
+        payload = self._read_json_body()
+        try:
+            new_overrides = self._overrides_from_payload(payload)
+        except (ValueError, KeyError, TypeError) as e:
+            self._send_json({"success": False, "error": str(e)}, status=400)
+            return
+
+        path = overrides_path_for(self.config_path)
+        previous = None
+        current: Dict[str, Any] = {}
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                previous = f.read()
+            current = yaml.safe_load(previous) or {}
+        # Settings sent now replace what was saved before for the same keys; values equal to
+        # config.yaml are left out, so later edits to config.yaml (or new defaults) still apply.
+        for keys in _leaf_paths(new_overrides):
+            _delete_path(current, keys)
+        merged = deep_merge(current, _prune_same(new_overrides, self._base_values()))
+        _drop_empty(merged)
+
+        header = "# Saved by the dashboard's Settings page. Values here override config.yaml.\n"
+        if merged:
+            control.atomic_write(path, header + yaml.safe_dump(merged, sort_keys=True))
+        elif os.path.exists(path):
+            os.remove(path)
+        try:
+            new_cfg = load_config(self.config_path)
+        except Exception as e:
+            if previous is None:
+                if os.path.exists(path):
+                    os.remove(path)
+            else:
+                control.atomic_write(path, previous)
+            self._send_json({"success": False, "error": f"Settings not saved: {e}"}, status=400)
+            return
+
+        cls = type(self)
+        cls.config = new_cfg
+        cls.evaluator = CollectionEvaluator(self.evaluator.provider, self.state_store, new_cfg)
+        self.config, self.evaluator = new_cfg, cls.evaluator
+        self.state_store.log_event("settings", "Settings saved from the dashboard.")
+        self._send_json({"success": True, "settings": self._settings_payload()})
+
+    # ------------------------------------------------------------------
+    # Logs
+    # ------------------------------------------------------------------
     def _handle_get_logs(self, query):
         max_lines = int(query.get("lines", [150])[0])
         if not os.path.exists(LOG_FILE):
@@ -354,11 +634,13 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self._send_json({"lines": [f"Error reading logs: {e}"]})
 
-def run_dashboard_server(host: str = "127.0.0.1", port: int = 5050, config_path: str = "config/config.yaml"):
-    """Starts the dashboard HTTP server."""
+
+def run_dashboard_server(host: str = "127.0.0.1", port: int = 5050, config_path: str = "config/config.yaml",
+                         supervise: bool = True):
+    """Starts the dashboard HTTP server and the bot supervisor."""
     cfg = load_config(config_path)
     store = StateStore(cfg.general.state_db_path)
-    client = OpenSeaClient(api_key=cfg.opensea_api_key)
+    client = OpenSeaClient(api_key=cfg.opensea_api_key, request_delay=cfg.scheduler.request_delay_seconds)
     provider = OpenSeaProvider(client)
     evaluator = CollectionEvaluator(provider, store, cfg)
 
@@ -366,11 +648,15 @@ def run_dashboard_server(host: str = "127.0.0.1", port: int = 5050, config_path:
     DashboardRequestHandler.config = cfg
     DashboardRequestHandler.state_store = store
     DashboardRequestHandler.evaluator = evaluator
+    DashboardRequestHandler.config_path = config_path
 
-    server_address = (host, port)
-    httpd = ThreadingHTTPServer(server_address, DashboardRequestHandler)
+    if supervise:
+        sup = control.Supervisor(config_path=config_path, state_store=store)
+        threading.Thread(target=sup.run_forever, name="bot-supervisor", daemon=True).start()
+
+    httpd = ThreadingHTTPServer((host, port), DashboardRequestHandler)
     print(f"\n=======================================================")
-    print(f"🚀 NFT Bot Dashboard running at: http://{host}:{port}")
+    print(f"NFT Monitor dashboard running at: http://{host}:{port}")
     print(f"=======================================================\n")
 
     try:

@@ -1,6 +1,6 @@
 import os
 import re
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from datetime import datetime
 from ..models.collection import CollectionMetadata
 from ..models.metrics import SalesMetrics, FloorPriceMetrics, ListingMetrics
@@ -31,6 +31,8 @@ def render_info_md(
     detection_dt_local: datetime,
     tz_name: str = "Asia/Kolkata",
     bot_version: str = "1.0.0",
+    num_owners: Optional[int] = None,
+    data_notes: Optional[List[str]] = None,
 ) -> str:
     """
     Renders the human-readable and machine-parseable Info.md markdown handoff file.
@@ -58,6 +60,7 @@ def render_info_md(
     if listing_metrics.is_early_exit_exceeded:
         listed_pct_str = f">{listed_pct_str} (exceeded threshold early)"
     total_supply_str = f"{collection.total_supply:,}" if collection.total_supply is not None else "UNKNOWN"
+    data_notes_md = "\n".join(f"- {n}" for n in (data_notes or [])) or "- None"
     listed_items_str = f"{listing_metrics.listed_items:,}" if listing_metrics.listed_items is not None else "UNKNOWN"
 
     # Daily sales table
@@ -149,7 +152,7 @@ def render_info_md(
 ## Collection Size
 
 - **Total Supply**: {total_supply_str}
-- **Owners**: {collection.total_supply if collection.total_supply is not None else 'UNKNOWN'}
+- **Owners**: {f'{num_owners:,}' if num_owners is not None else 'UNKNOWN'}
 - **Listed Items**: {listed_items_str}
 - **Listed Percentage**: {listed_pct_str}
 
@@ -208,7 +211,7 @@ def render_info_md(
 ### B. Model Assumptions (Configured Trading Strategy Parameters)
 - **[ASSUMPTION] Entry-Offer Premium**: +{asm.entry_offer_premium_pct:.1f}% above observed top offer
 - **[ASSUMPTION] Target Exit Discount**: -{asm.target_sale_discount_from_floor_pct:.1f}% below current floor
-- **[ASSUMPTION] Gas Estimate**: {asm.gas_estimate_eth:.4f} ETH
+- **[ASSUMPTION] Gas Estimate**: {asm.gas_estimate_eth:.4f} {trade_economics.currency} (per trade, chain-specific)
 
 ### C. Modelled Results (Theoretical Estimates)
 - **Modelled Entry Offer (Hypothetical Buy Price)**: {modelled_entry_str}
@@ -237,7 +240,11 @@ def render_info_md(
 - OpenSea Historical Floor Price API: `GET /api/v2/collections/{collection.slug}/floor_prices`
 - OpenSea Collection Events API: `GET /api/v2/events/collection/{collection.slug}?event_type=sale`
 - OpenSea Collection Listings API: `GET /api/v2/listings/collection/{collection.slug}/all`
-- OpenSea Collection Offers API: `GET /api/v2/offers/collection/{collection.slug}/all`
+- OpenSea Collection Offers API: `GET /api/v2/offers/collection/{collection.slug}`
+
+## Data Notes
+
+{data_notes_md}
 
 ## Notes
 
@@ -260,6 +267,8 @@ def write_candidate_info_md(
     detection_dt_local: datetime,
     tz_name: str = "Asia/Kolkata",
     bot_version: str = "1.0.0",
+    num_owners: Optional[int] = None,
+    data_notes: Optional[List[str]] = None,
 ) -> str:
     """
     Atomically writes Info.md to DATA_ROOT/YYYY-MM-DD/<Sanitized_Project>/Info.md
@@ -285,6 +294,8 @@ def write_candidate_info_md(
         detection_dt_local=detection_dt_local,
         tz_name=tz_name,
         bot_version=bot_version,
+        num_owners=num_owners,
+        data_notes=data_notes,
     )
 
     with open(tmp_path, "w", encoding="utf-8") as f:

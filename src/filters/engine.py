@@ -63,6 +63,16 @@ class FilterEngine:
         # 8. Minimum Net Profit (modelled ROI after fees, royalty and gas)
         report.add_criterion(self._eval_net_profit(trade_economics, now_iso))
 
+        # Rules switched off in Settings are still measured but never block (OBSERVE)
+        for name, crit in report.criteria.items():
+            if not self.is_enabled(name) and crit.result != FilterResultStatus.OBSERVE:
+                would = crit.result.value
+                crit.result = FilterResultStatus.OBSERVE
+                crit.notes = f"Switched off (would have been {would}). " + (crit.notes or "")
+        report.rejection_reasons = [
+            r for r in report.rejection_reasons if self.is_enabled(r.split(":", 1)[0])
+        ]
+
         # Determine overall pass/fail
         # Must pass all blocking criteria (PASS or OBSERVE). Any FAIL or DATA_INSUFFICIENT fails the candidate.
         blocking_results = [
@@ -72,6 +82,10 @@ class FilterEngine:
         report.is_overall_pass = all(r == FilterResultStatus.PASS for r in blocking_results)
 
         return report
+
+    def is_enabled(self, rule: str) -> bool:
+        cfg = getattr(self.config, rule, None)
+        return bool(getattr(cfg, "enabled", True)) if cfg is not None else True
 
     def _eval_project_age(
         self,

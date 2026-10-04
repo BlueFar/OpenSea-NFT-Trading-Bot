@@ -33,7 +33,7 @@ class CollectionDataProvider(ABC):
         pass
 
     @abstractmethod
-    def get_sale_events(self, slug: str, after_timestamp: int) -> Optional[List[SaleEvent]]:
+    def get_sale_events(self, slug: str, after_timestamp: int, **kwargs) -> Optional[List[SaleEvent]]:
         """Fetches sale events occurring after the given Unix epoch timestamp. Returns None if API fails."""
         pass
 
@@ -51,7 +51,7 @@ class CollectionDataProvider(ABC):
         pass
 
     @abstractmethod
-    def get_top_offer(self, slug: str) -> Optional[Offer]:
+    def get_top_offer(self, slug: str, currency_filter=None) -> Optional[Offer]:
         """Fetches the highest active offer/bid for a collection."""
         pass
 

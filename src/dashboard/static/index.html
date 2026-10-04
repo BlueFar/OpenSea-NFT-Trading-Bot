@@ -3,229 +3,180 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>OpenSea NFT Monitor — Bot Dashboard</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <title>NFT Monitor</title>
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-  <div class="app-layout">
-    <!-- TOP NAVIGATION & CONTROL BAR -->
-    <header class="app-header">
-      <div class="header-brand">
-        <div class="brand-icon">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
-          </svg>
-        </div>
-        <div>
-          <div class="brand-title">NFT Collection Monitor</div>
-          <div class="brand-subtitle">Stage 1 Deterministic BOT Dashboard</div>
-        </div>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5-6 4 4 4-7 5 9"/><path d="M3 21h18"/></svg>
       </div>
-
-      <!-- BOT CONTROL BUTTONS & STATUS CAPSULE -->
-      <div class="header-controls">
-        <div class="status-capsule" id="botStatusCapsule">
-          <span class="status-dot" id="statusDot"></span>
-          <span class="status-label" id="statusText">CHECKING...</span>
-          <span class="status-meta" id="statusMeta"></span>
-        </div>
-
-        <div class="control-actions">
-          <label class="checkbox-label" title="Run discovery/evaluation without creating candidate files">
-            <input type="checkbox" id="dryRunToggle">
-            <span>Dry Run</span>
-          </label>
-          <button id="btnStartBot" class="btn btn-primary">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-              <polygon points="5 3 19 12 5 21 5 3"/>
-            </svg>
-            <span>Start Bot</span>
-          </button>
-          <button id="btnStopBot" class="btn btn-danger" disabled>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-              <rect x="4" y="4" width="16" height="16" rx="2"/>
-            </svg>
-            <span>Stop Bot</span>
-          </button>
-        </div>
-      </div>
-    </header>
-
-    <!-- METRICS CARDS -->
-    <section class="metrics-grid">
-      <div class="metric-card">
-        <div class="metric-label">Daemon State</div>
-        <div class="metric-value-row">
-          <span class="metric-value" id="cardStatus">—</span>
-        </div>
-        <div class="metric-subtext" id="cardUptime">Uptime: —</div>
-      </div>
-
-      <div class="metric-card">
-        <div class="metric-label">Qualified Candidates</div>
-        <div class="metric-value-row">
-          <span class="metric-value text-accent" id="cardCandidates">0</span>
-        </div>
-        <div class="metric-subtext">Pass all 7 BOT filters</div>
-      </div>
-
-      <div class="metric-card">
-        <div class="metric-label">Monitored Universe</div>
-        <div class="metric-value-row">
-          <span class="metric-value" id="cardMonitored">0</span>
-        </div>
-        <div class="metric-subtext">Collections in SQLite catalog</div>
-      </div>
-
-      <div class="metric-card">
-        <div class="metric-label">Discovery Checkpoint</div>
-        <div class="metric-value-row">
-          <span class="metric-value text-mono text-sm" id="cardCursor">START</span>
-        </div>
-        <div class="metric-subtext" id="cardCheckpointTime">Source: collections</div>
-      </div>
-    </section>
-
-    <!-- LIVE 7-CONDITION INSPECTOR TOOL -->
-    <section class="panel-section">
-      <div class="section-header">
-        <div>
-          <h2 class="section-title">Diagnostic Collection Inspector</h2>
-          <p class="section-desc">Test any collection slug or OpenSea URL in real-time against all 7 quantitative filter rules.</p>
-        </div>
-      </div>
-
-      <form id="inspectForm" class="inspect-bar">
-        <div class="input-wrapper">
-          <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="11" cy="11" r="8"/>
-            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
-          </svg>
-          <input type="text" id="inspectInput" placeholder="Enter collection slug or OpenSea URL (e.g. cryptopunks, doodles-official)..." required>
-        </div>
-        <button type="submit" id="btnInspect" class="btn btn-accent">
-          <span class="btn-text">Inspect 7 Conditions</span>
-          <span class="btn-spinner hidden"></span>
-        </button>
-      </form>
-
-      <!-- INSPECT RESULTS CONTAINER -->
-      <div id="inspectResults" class="inspect-results-container hidden">
-        <div class="inspect-summary-card">
-          <div class="summary-meta">
-            <span class="summary-slug" id="resSlug">—</span>
-            <span class="summary-status-badge" id="resOverallBadge">PENDING</span>
-          </div>
-          <div id="resRejectionAlert" class="rejection-alert hidden"></div>
-        </div>
-
-        <div class="criteria-grid" id="criteriaGrid">
-          <!-- 7 Condition Cards dynamically inserted here -->
-        </div>
-      </div>
-    </section>
-
-    <!-- MAIN EXPLORER TABS -->
-    <section class="panel-section">
-      <div class="tabs-header">
-        <button class="tab-btn active" data-tab="candidatesTab">
-          Qualified Candidates
-          <span class="tab-count" id="tabCandidatesCount">0</span>
-        </button>
-        <button class="tab-btn" data-tab="universeTab">
-          Monitored Universe
-          <span class="tab-count" id="tabUniverseCount">0</span>
-        </button>
-        <button class="tab-btn" data-tab="logsTab">
-          Live Activity Logs
-        </button>
-      </div>
-
-      <!-- TAB 1: QUALIFIED CANDIDATES -->
-      <div class="tab-content active" id="candidatesTab">
-        <div class="table-container">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Project Name</th>
-                <th>Generated Artifact</th>
-                <th>File Size</th>
-                <th>Modified</th>
-                <th>Action</th>
-              </tr>
-            </thead>
-            <tbody id="candidatesTableBody">
-              <tr>
-                <td colspan="6" class="text-center py-6 text-muted">No candidates found yet.</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- TAB 2: MONITORED UNIVERSE -->
-      <div class="tab-content" id="universeTab">
-        <div class="universe-toolbar">
-          <input type="text" id="universeSearchInput" placeholder="Filter collections by slug..." class="toolbar-search">
-          <button id="btnRefreshUniverse" class="btn btn-secondary">Refresh</button>
-        </div>
-        <div class="table-container">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Collection Slug</th>
-                <th>Discovery Source</th>
-                <th>Evaluations</th>
-                <th>Last Evaluated (UTC)</th>
-                <th>Action</th>
-              </tr>
-            </thead>
-            <tbody id="universeTableBody">
-              <tr>
-                <td colspan="5" class="text-center py-6 text-muted">Loading collections...</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- TAB 3: LIVE ACTIVITY LOGS -->
-      <div class="tab-content" id="logsTab">
-        <div class="logs-toolbar">
-          <div class="logs-meta">Showing last 150 lines from <code>bot.log</code></div>
-          <div class="logs-actions">
-            <label class="checkbox-label text-sm">
-              <input type="checkbox" id="autoScrollLogs" checked>
-              <span>Auto-Scroll</span>
-            </label>
-            <button id="btnRefreshLogs" class="btn btn-secondary btn-sm">Refresh Now</button>
-          </div>
-        </div>
-        <pre class="logs-terminal" id="logsTerminal">Loading logs...</pre>
-      </div>
-    </section>
-  </div>
-
-  <!-- DOSSIER VIEWER MODAL -->
-  <dialog id="dossierModal" class="dossier-dialog">
-    <div class="dialog-content">
-      <div class="dialog-header">
-        <div>
-          <h3 class="dialog-title" id="modalProjectTitle">Project Dossier</h3>
-          <span class="dialog-subtitle" id="modalDateSubtitle"></span>
-        </div>
-        <button id="btnModalClose" class="btn-close" aria-label="Close dialog">&times;</button>
-      </div>
-      <div class="dialog-body" id="modalMarkdownBody">
-        <div class="text-muted">Loading dossier...</div>
+      <div>
+        <div class="brand-name">NFT Monitor</div>
+        <div class="brand-sub">OpenSea · this Mac</div>
       </div>
     </div>
-  </dialog>
+    <nav class="nav" aria-label="Pages">
+      <button data-page="home" aria-current="page">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/></svg>
+        Home
+      </button>
+      <button data-page="candidates">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l2.6 5.4 5.9.8-4.3 4.1 1 5.9L12 16.4 6.8 19.2l1-5.9L3.5 9.2l5.9-.8z"/></svg>
+        Candidates <span class="badge num" id="badgeCand">0</span>
+      </button>
+      <button data-page="near">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5"/></svg>
+        Near misses <span class="badge num" id="badgeNear">0</span>
+      </button>
+      <button data-page="check">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+        Check a collection
+      </button>
+      <button data-page="settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+        Settings
+      </button>
+    </nav>
+    <div class="side-status" id="sideStatus"></div>
+  </aside>
 
-  <script src="/static/app.js"></script>
+  <main class="main">
+    <!-- HOME -->
+    <section class="page active" id="page-home" aria-labelledby="h-home">
+      <div class="page-head">
+        <div>
+          <h1 id="h-home">Hello</h1>
+          <p id="homeSub">Here's what the bot has been doing.</p>
+        </div>
+      </div>
+
+      <div class="card status-card" id="statusCard"><div class="loading">Loading…</div></div>
+      <div id="homeBanner"></div>
+
+      <div class="stats">
+        <div class="card stat">
+          <span class="stat-label">Checked today</span>
+          <span class="stat-value num" id="statChecked">–</span>
+          <span class="stat-sub" id="statCheckedSub">collections</span>
+        </div>
+        <div class="card stat">
+          <span class="stat-label">Shortlisted</span>
+          <span class="stat-value num" id="statShort">–</span>
+          <span class="stat-sub">pass the basics, re-checked often</span>
+        </div>
+        <div class="card stat">
+          <span class="stat-label">Candidates this week</span>
+          <span class="stat-value num c-good" id="statCand">–</span>
+          <span class="stat-sub">pass every rule that's switched on</span>
+        </div>
+        <div class="card stat">
+          <span class="stat-label">Floor history</span>
+          <div class="stat-ring" id="ringBox"></div>
+        </div>
+      </div>
+
+      <div class="two-col">
+        <div class="card panel">
+          <div class="section-title"><h2>Why collections were rejected</h2><span id="funnelSub">Last 7 days</span></div>
+          <div class="funnel" id="funnel"></div>
+          <p class="chart-note">Each collection counts once per day, under the first rule it failed.</p>
+        </div>
+        <div class="card panel">
+          <div class="section-title"><h2>Recent activity</h2><span>Newest first</span></div>
+          <ul class="feed" id="feed"></ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- CANDIDATES -->
+    <section class="page" id="page-candidates" aria-labelledby="h-cand">
+      <div class="page-head">
+        <div>
+          <h1 id="h-cand">Candidates</h1>
+          <p>Collections that passed every rule that was switched on. Each one also has an Info.md file ready for research.</p>
+        </div>
+        <div class="chips" role="group" aria-label="Time range" id="rangeChips">
+          <button class="chip" type="button" data-days="1" aria-pressed="false">Today</button>
+          <button class="chip" type="button" data-days="7" aria-pressed="true">7 days</button>
+          <button class="chip" type="button" data-days="30" aria-pressed="false">30 days</button>
+        </div>
+      </div>
+      <div class="cand-grid" id="candGrid"><div class="loading">Loading…</div></div>
+    </section>
+
+    <!-- NEAR MISSES -->
+    <section class="page" id="page-near" aria-labelledby="h-near">
+      <div class="page-head">
+        <div>
+          <h1 id="h-near">Near misses</h1>
+          <p>Collections from the last 7 days that failed a rule by a small margin, closest first. If the same rule keeps showing up here, it may be too strict.</p>
+        </div>
+      </div>
+      <div class="card nm-list" id="nmList"><div class="loading">Loading…</div></div>
+      <div>
+        <div class="section-title"><h2>Waiting for floor history</h2><span>Passed everything checked so far</span></div>
+        <div class="card nm-list" id="waitList"></div>
+      </div>
+    </section>
+
+    <!-- CHECK -->
+    <section class="page" id="page-check" aria-labelledby="h-check">
+      <div class="page-head">
+        <div>
+          <h1 id="h-check">Check a collection</h1>
+          <p>Paste an OpenSea link or collection name to see how it does against your rules right now. Nothing is saved.</p>
+        </div>
+      </div>
+      <form class="card search" id="checkForm" autocomplete="off">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+        <input id="checkInput" type="text" placeholder="https://opensea.io/collection/…  or a collection name" aria-label="OpenSea link or collection name">
+        <button class="btn primary" type="submit">Check</button>
+      </form>
+      <div id="checkOut"></div>
+    </section>
+
+    <!-- SETTINGS -->
+    <section class="page" id="page-settings" aria-labelledby="h-set">
+      <div class="page-head">
+        <div>
+          <h1 id="h-set">Settings</h1>
+          <p>Switch rules on or off and set their limits. A switched-off rule is still measured and shown, but it no longer rejects collections.</p>
+        </div>
+      </div>
+      <div class="card set-group">
+        <header><h2>Rules</h2><p>A collection becomes a candidate only when it passes every rule that's on.</p></header>
+        <div id="ruleRows"></div>
+      </div>
+      <div class="card set-group">
+        <header><h2>Trade model</h2><p>How the bot estimates the buy and sell for each candidate.</p></header>
+        <div id="tradeRows"></div>
+      </div>
+      <div class="card set-group">
+        <header><h2>Chains</h2><p>Which networks the bot looks through, and the gas each trade costs there (in that chain's coin).</p></header>
+        <div class="chain-tools" id="chainTools"></div>
+        <div class="chain-table" id="chainRows"></div>
+      </div>
+      <div class="card set-group">
+        <header><h2>On this Mac</h2><p>What happens after a power cut or restart.</p></header>
+        <div id="macRows"></div>
+      </div>
+      <div class="savebar" id="saveBar" hidden>
+        <span>You have unsaved changes.</span>
+        <span style="display:flex;gap:8px">
+          <button class="btn ghost" id="btnDiscard" type="button">Discard</button>
+          <button class="btn primary" id="btnSave" type="button">Save changes</button>
+        </span>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="overlay" id="overlay"></div>
+<aside class="drawer" id="drawer" aria-hidden="true" aria-labelledby="drawerTitle"></aside>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script src="/static/app.js"></script>
 </body>
 </html>

@@ -1,4 +1,4 @@
-from typing import Optional, List, Tuple
+from typing import Optional, List, Set, Tuple
 from ..models.collection import CollectionMetadata, Fee
 from ..models.trade import (
     ObservedMarketData,
@@ -10,6 +10,10 @@ from ..models.trade import (
 KNOWN_OPENSEA_FEE_RECIPIENTS = {
     "0x0000a26b00c1f0df003000390027140000faa719",  # Seaport 1.5/1.6 OpenSea Fee Collector
     "0x5b3256965e7c3cf26e11fcaf296dfc8807c01073",  # OpenSea Legacy Fee Wallet
+    # Chain-specific OpenSea fee recipients (OpenSea SDK 12.11.2, src/constants.ts)
+    "0x07d3a100c3880830dd43fe5c938b5144721ce9d6",  # Alternate fee recipient (MegaETH)
+    "0xdfe1593dca6ad8a20eeb418643e48577c1626f7c",  # Somnia
+    "0xd9f68d28e451a83affdb7c71cc2c20552555b07f",  # Gunzilla (GUNZ)
 }
 
 def extract_fees_from_collection(collection: CollectionMetadata) -> Tuple[Optional[float], Optional[float], bool]:
@@ -57,13 +61,14 @@ def compute_trade_economics(
     target_sale_discount_from_floor_pct: float = 5.0,
     gas_estimate_eth: float = 0.005,
     fallback_marketplace_fee_pct: Optional[float] = None,
+    currency_groups: Optional[List[Set[str]]] = None,
 ) -> TradeEconomics:
     """
     Calculates theoretical trade economics according to user specifications:
     - Distinguishes observed market data, model assumptions, and modelled results.
     - Marketplace fee comes from collection metadata; if absent, the explicitly configured
       fallback_marketplace_fee_pct is used and labelled CONFIG. With no fallback, marks incomplete.
-    - Handles currency parity (ETH == WETH).
+    - Handles currency parity (ETH == WETH, and per chain e.g. APE == WAPE via currency_groups).
     """
     # Extract fees from collection if available
     mp_fee_pct = None
@@ -109,11 +114,10 @@ def compute_trade_economics(
             currency=floor_currency,
         )
 
-    # Check currency compatibility (ETH and WETH are 1:1 interchangeable on EVM)
-    is_compatible_currency = (
-        (floor_currency.upper() in ("ETH", "WETH") and top_offer_currency.upper() in ("ETH", "WETH"))
-        or (floor_currency.upper() == top_offer_currency.upper())
-    )
+    # Check currency compatibility: a coin and its wrapped form are 1:1 interchangeable
+    groups = currency_groups or [{"ETH", "WETH"}]
+    fc, oc = (floor_currency or "").upper(), (top_offer_currency or "").upper()
+    is_compatible_currency = fc == oc or any(fc in g and oc in g for g in groups)
     if not is_compatible_currency:
         return TradeEconomics(
             observed=observed,
