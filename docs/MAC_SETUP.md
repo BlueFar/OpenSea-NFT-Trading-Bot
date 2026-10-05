@@ -65,6 +65,9 @@ at the same address and the bot should be running again within a few seconds.
 - **Candidates** are collections that passed every rule. Click one for the trade plan and its Info.md.
   Use **Sort by** and **Filters** (for example a minimum spread and your budget as the maximum buy price) to narrow the list.
   These only change what's shown, not the bot's rules, and the page remembers them.
+- **Trading pace** also checks what buyers paid. At least 1 of last week's sales must be at about the floor
+  price (90–115% of the floor at the time), so a collection whose sales are all people accepting the top offer
+  doesn't pass. Each candidate shows a "What buyers paid" list. Change the number in Settings (0 turns it off).
 - **Dollar values:** point at any coin amount (or tap it on a phone) to see it in US dollars now and, for candidates,
   when they were found. Prices come from OpenSea, with CoinGecko filling in coins OpenSea hasn't priced yet.
 - **Near misses** are collections that missed one rule by a small margin. If one rule keeps showing up here, it may be too strict.

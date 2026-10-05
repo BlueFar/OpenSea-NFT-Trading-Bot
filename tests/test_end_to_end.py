@@ -36,7 +36,7 @@ def test_full_evaluation_passing_collection_creates_info_md():
             total_supply=10000,
         )
         mock_provider.get_active_listings_count.return_value = (300, False) # 3% (< 6%)
-        mock_provider.get_sale_events.return_value = make_sample_sales_events([1, 1, 1, 1, 1, 1, 1]) # 1.0/day (<= 2)
+        mock_provider.get_sale_events.return_value = make_sample_sales_events([1, 1, 1, 1, 1, 1, 1], price=1.45) # 1.0/day (<= 2)
         
         curr_floor, points_1d, points_7d = make_sample_floor_history(1.5, pct_change_1d=2.0, pct_change_7d=3.0)
         mock_provider.get_collection_stats.return_value = CollectionStats(floor_price=curr_floor, floor_price_symbol="ETH")

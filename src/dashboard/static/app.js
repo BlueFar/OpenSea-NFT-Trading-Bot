@@ -7,7 +7,7 @@
     { key: "verification", name: "Blue tick", desc: "Verified on OpenSea", kind: "bool" },
     { key: "project_age", name: "Collection age", desc: "Days since it was created on OpenSea", unit: "days", kind: "min", prefix: "More than" },
     { key: "listed_items", name: "Listed for sale", desc: "Share of the supply that's listed", unit: "%", kind: "max", prefix: "Under" },
-    { key: "trading_frequency", name: "Trading pace", desc: "Sales per day, averaged over 7 full days, and at least some sales that week", unit: "per day", kind: "max", prefix: "At most" },
+    { key: "trading_frequency", name: "Trading pace", desc: "Sales per day over 7 full days, with some bought at about the floor price, not only accepted offers", unit: "per day", kind: "max", prefix: "At most" },
     { key: "floor_change_1d", name: "Floor move in 1 day", desc: "Up or down", unit: "%", kind: "max", prefix: "Under" },
     { key: "floor_change_7d", name: "Floor move in 7 days", desc: "Up or down", unit: "%", kind: "max", prefix: "Under" },
     { key: "offer_to_floor", name: "Spread over top offer", desc: "How far the floor sits above the top offer, royalty included", unit: "%", kind: "min", prefix: "At least" },
@@ -18,7 +18,7 @@
 
   var FUNNEL_LABELS = {
     verification: "No blue tick", project_age: "Too new", listed_items: "Too many listed",
-    trading_frequency: "Trades too often or not at all", floor_history_1d: "Waiting for floor history (1 day)",
+    trading_frequency: "Trades too often, too rarely or only to offers", floor_history_1d: "Waiting for floor history (1 day)",
     floor_history_7d: "Waiting for floor history (7 days)", floor_change_1d: "Floor moved (1 day)",
     floor_change_7d: "Floor moved (7 days)", offer_to_floor: "Spread too small", net_profit: "Profit too small",
     floor_price: "No floor price", total_supply: "Supply missing", collection_fetch: "Couldn't load details",
@@ -91,6 +91,11 @@
     if (withTime) { o.hour = "2-digit"; o.minute = "2-digit"; }
     try { return d.toLocaleString("en-GB", o); } catch (e) { delete o.timeZone; return d.toLocaleString("en-GB", o); }
   }
+  function shortDay(v) {
+    var d = toDate(v); if (!d) return "";
+    var o = { day: "numeric", month: "short", timeZone: state.tz };
+    try { return d.toLocaleDateString("en-GB", o); } catch (e) { delete o.timeZone; return d.toLocaleDateString("en-GB", o); }
+  }
   function ago(v) {
     var d = toDate(v); if (!d) return "";
     var s = Math.max(0, (Date.now() - d.getTime()) / 1000);
@@ -147,19 +152,23 @@
     if (rule.unit === "%") return fmt(v, 1) + "%";
     if (rule.unit === "days") return fmt(v, 0) + " days";
     if (rule.unit === "per day") return fmt(v, 2) + "/day";
-    if (rule.unit === "sales") return int(v) + (v === 1 ? " sale" : " sales");
+    if (rule.unit === "sales" || rule.unit === "floor sales") return int(v) + (v === 1 ? " sale" : " sales");
     return String(v);
   }
   var WEEK_SALES = { key: "trading_frequency", name: "Trading pace: sales this week", unit: "sales", kind: "min", prefix: "At least" };
-  // A trading-pace rejection for too few sales is measured in sales per week, not per day
+  var FLOOR_SALES = { key: "trading_frequency", name: "Trading pace: sales at floor price", unit: "floor sales", kind: "min", prefix: "At least" };
+  // A trading-pace rejection for too few sales (or too few at floor price) is counted per week, not per day
   function ruleFor(key, unit) {
     if (key === "trading_frequency" && unit === "sales in 7 days") return WEEK_SALES;
+    if (key === "trading_frequency" && unit === "floor sales in 7 days") return FLOOR_SALES;
     return RULE_BY_KEY[key];
   }
-  function minWeekSales() {
+  function paceSetting(name) {
     var r = state.settings && state.settings.rules && state.settings.rules.trading_frequency;
-    return r && isNum(r.min_sales_7d) ? r.min_sales_7d : 0;
+    return r && isNum(r[name]) ? r[name] : 0;
   }
+  function minWeekSales() { return paceSetting("min_sales_7d"); }
+  function floorBand() { return fmt(paceSetting("floor_sale_min_pct") || 90, 0) + "–" + fmt(paceSetting("floor_sale_max_pct") || 115, 0) + "% of the floor"; }
 
   // ---------- Navigation ----------
   function go(page) {
@@ -555,8 +564,10 @@
   }
   function shortBy(d, rule) {
     var diff = Math.abs(d.value - d.limit);
-    var u = rule.unit === "%" ? " points" : rule.unit === "days" ? " days" : rule.unit === "sales" ? " sales" : " sales/day";
-    return fmt(diff, rule.unit === "days" || rule.unit === "sales" ? 0 : rule.unit === "per day" ? 2 : 1) + u + (d.kind === "max" ? " over" : " short");
+    var whole = rule.unit === "days" || rule.unit === "sales" || rule.unit === "floor sales";
+    var u = rule.unit === "%" ? " points" : rule.unit === "days" ? " days" : rule.unit === "sales" ? " sales" :
+      rule.unit === "floor sales" ? (diff === 1 ? " floor sale" : " floor sales") : " sales/day";
+    return fmt(diff, whole ? 0 : rule.unit === "per day" ? 2 : 1) + u + (d.kind === "max" ? " over" : " short");
   }
   function nmRow(r) {
     var d = r.details || {}, rule = ruleFor(r.reject_filter || d.rule, d.unit) || { name: r.reject_filter, unit: "" };
@@ -600,10 +611,14 @@
     else shown = val == null || val === "None" ? "–" : String(val);
     var why;
     if (key === "verification") why = "Needs the OpenSea blue tick";
+    else if (rule === FLOOR_SALES && x.limit != null) why = "At least " + unitText(rule, x.limit) + " in 7 days where the buyer paid " + floorBand();
     else if (x.limit != null) why = (rule.prefix || "Limit") + " " + unitText(rule, x.limit).replace("/day", " a day") + (rule === WEEK_SALES ? " in the last 7 days" : "");
     else why = rule.desc || "";
-    if (key === "trading_frequency" && rule !== WEEK_SALES && x.limit != null && minWeekSales() > 0) {
-      why += " and at least " + unitText(WEEK_SALES, minWeekSales()) + " in 7 days";
+    if (key === "trading_frequency" && rule === RULE_BY_KEY.trading_frequency && x.limit != null) {
+      var extras = [];
+      if (minWeekSales() > 0) extras.push("at least " + unitText(WEEK_SALES, minWeekSales()) + " in 7 days");
+      if (paceSetting("min_floor_sales_7d") > 0) extras.push(paceSetting("min_floor_sales_7d") + " at floor price");
+      if (extras.length) why += ", " + extras.join(", ");
     }
     if (res === "DATA_INSUFFICIENT" && on) why = (key.indexOf("floor_change") === 0 ? "No saved floor price from back then yet" : "Not enough data");
     var whyHtml = esc(why), then = d && foundRate(d);
@@ -652,6 +667,28 @@
     var b = e.target.closest("[data-open]"); if (b) openDrawer(b.getAttribute("data-open"), b.getAttribute("data-date"));
   });
 
+  // Each of last week's sales against the floor at the time: floor buys vs accepted offers vs rare items
+  var PAID_LABELS = {
+    floor: ["good", "Floor price"], below: ["warn", "Below floor"], above: ["neutral", "Above floor"], skipped: ["neutral", "Not compared"]
+  };
+  function buyersPaid(d) {
+    var fs = d.floor_sales;
+    if (!fs || !fs.rows || !fs.rows.length) return "";
+    var band = fmt(fs.min_pct, 0) + "–" + fmt(fs.max_pct, 0) + "%";
+    var head = fs.count + " of " + fs.total + " at floor price";
+    var rows = fs.rows.map(function (r) {
+      var l = PAID_LABELS[r.label] || PAID_LABELS.skipped;
+      var pct = isNum(r.pct) ? fmt(r.pct, 0) + "%" : esc(r.note || "");
+      return '<tr><td class="paid-day">' + esc(shortDay(r.ts)) + '</td><td class="paid-amt">' + (isNum(r.price) ? money(r.price, r.currency) : "–") + "</td>" +
+        '<td class="paid-pct">' + pct + '</td><td><span class="pill ' + l[0] + '">' + l[1] + "</span></td></tr>";
+    }).join("");
+    var more = fs.total > fs.rows.length ? '<p class="chart-note">Showing the latest ' + fs.rows.length + " of " + fs.total + " sales.</p>" : "";
+    return '<div class="card panel"><div class="section-title"><h2>What buyers paid</h2><span>' + esc(head) + "</span></div>" +
+      '<table class="tbl paid"><thead><tr><th>Day</th><th>Paid</th><th>Of floor</th><th></th></tr></thead><tbody>' + rows + "</tbody></table>" + more +
+      '<p class="chart-note">A floor-price sale paid ' + band + " of the floor at the time. Sales well below the floor are usually someone accepting an offer, " +
+      "which says nothing about whether your listing near the floor will sell.</p></div>";
+  }
+
   function drawerBody(d, extra, skipRules) {
     var cur = d.currency || "", then = foundRate(d), offThen = foundRate(d, true), lim = (state.overview && state.overview.limits) || {};
     var html = "";
@@ -679,6 +716,7 @@
           return '<div><span class="num" style="color:var(--fg);font-weight:600">' + x[1] + '</span><i class="' + (x[1] ? "" : "zero") + '" style="height:' + (x[1] / max * 46 + 2).toFixed(0) + 'px"></i>' + esc(lbl) + "</div>";
         }).join("") + "</div></div>";
     }
+    html += buyersPaid(d);
     if (!skipRules) html += '<div class="card" style="overflow:hidden"><div class="section-title" style="padding:16px 20px 0;margin:0"><h2>Rules</h2></div>' + checklistFromDetails(d) + "</div>";
     if ((d.data_notes || []).length) html += '<div class="card panel"><div class="section-title"><h2>Data notes</h2></div><ul class="notes">' + d.data_notes.map(function (n) { return "<li>" + esc(n) + "</li>"; }).join("") + "</ul></div>";
     return html + (extra || "");
@@ -753,7 +791,10 @@
         '<label class="field" for="v-' + r.key + '">' + r.prefix + ' <input id="v-' + r.key + '" type="number" step="any" min="0" value="' + esc(cfg.value) + '"' + dis + "> " + (r.unit === "per day" ? "a day" : r.unit) + "</label>";
       if (r.key === "trading_frequency") {
         field = '<div class="field-stack">' + field + '<label class="field" for="v2-trading_frequency">At least <input id="v2-trading_frequency" type="number" step="1" min="0" value="' +
-          esc(cfg.min_sales_7d) + '"' + dis + "> sales in 7 days</label></div>";
+          esc(cfg.min_sales_7d) + '"' + dis + "> sales in 7 days</label>" +
+          '<label class="field" for="v3-trading_frequency" title="Paid ' + fmt(cfg.floor_sale_min_pct || 90, 0) + "–" + fmt(cfg.floor_sale_max_pct || 115, 0) +
+          '% of the floor at the time. 0 turns this off.">At least <input id="v3-trading_frequency" type="number" step="1" min="0" value="' +
+          esc(cfg.min_floor_sales_7d) + '"' + dis + "> at floor price</label></div>";
       }
       return '<div class="set-row' + (cfg.enabled ? "" : " off") + '">' + sw("on-" + r.key, cfg.enabled, r.name) +
         '<div style="min-width:0"><div class="label">' + r.name + '</div><div class="desc">' + r.desc + "</div>" +
@@ -821,6 +862,7 @@
     if (!s || isNaN(v)) return;
     if (el.id.indexOf("v-") === 0) s.rules[el.id.slice(2)].value = v;
     else if (el.id === "v2-trading_frequency") s.rules.trading_frequency.min_sales_7d = Math.max(0, Math.round(v));
+    else if (el.id === "v3-trading_frequency") s.rules.trading_frequency.min_floor_sales_7d = Math.max(0, Math.round(v));
     else if (el.id.indexOf("t-") === 0) s.trade[el.id.slice(2)] = v;
     else if (el.id.indexOf("g-") === 0) { s.chains[+el.id.slice(2)].gas = v; var gu = $("gu-" + el.id.slice(2)); if (gu) gu.textContent = gasUsd(s.chains[+el.id.slice(2)]); }
     $("saveBar").hidden = !isDirty();

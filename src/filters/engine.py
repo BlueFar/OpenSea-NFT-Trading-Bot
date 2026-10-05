@@ -10,6 +10,7 @@ from ..models.filters import (
     FilterEvaluationReport,
 )
 from ..config.settings import FiltersConfig
+from ..metrics.floor_sales import too_few_floor_sales_reason
 
 class FilterEngine:
     """Evaluates candidate collections against deterministic quantitative filters."""
@@ -264,11 +265,26 @@ class FilterEngine:
         week_total = sales_7d_count(sales_metrics, cfg.sale_count_mode)
         notes = (f"Avg={avg_val:.2f}, Max={max_val}, 7d_total={sales_metrics.seven_day_sales_transactions} "
                  f"txs across 7 complete calendar days.")
+        too_few = cfg.min_sales_7d > 0 and week_total < cfg.min_sales_7d
         if cfg.min_sales_7d > 0:
             threshold += f" and >= {cfg.min_sales_7d} sales in 7 days"
-            if week_total < cfg.min_sales_7d:
+            if too_few:
                 is_pass = False
                 notes = too_few_sales_reason(week_total, cfg.min_sales_7d) + ". " + notes
+
+        # Were they bought at about the floor price, or were they all accepted offers?
+        fs = sales_metrics.floor_sales
+        if cfg.min_floor_sales_7d > 0:
+            threshold += (f" and >= {cfg.min_floor_sales_7d} at floor price "
+                          f"({cfg.floor_sale_min_pct:g}-{cfg.floor_sale_max_pct:g}% of floor)")
+            if fs is None:
+                notes += " Floor-price sales not measured (floor unknown)."
+            elif fs.floor_sales < cfg.min_floor_sales_7d:
+                is_pass = False
+                if not too_few:
+                    notes = too_few_floor_sales_reason(fs, cfg.min_floor_sales_7d) + ". " + notes
+        if fs is not None:
+            notes += " " + fs.breakdown() + "."
 
         return FilterCriterionResult(
             name="trading_frequency",

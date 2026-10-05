@@ -227,7 +227,7 @@ def test_acceptance_3_existing_collection_reevaluation():
         col = make_realistic_passing_collection()
         mock_provider.get_collection.return_value = col
         mock_provider.get_active_listings_count.return_value = (800, False) # 8.0% (> 6.0%)
-        mock_provider.get_sale_events.return_value = make_sample_sales_events([1, 1, 1, 1, 1, 1, 1])
+        mock_provider.get_sale_events.return_value = make_sample_sales_events([1, 1, 1, 1, 1, 1, 1], price=1.45)
         curr_floor, p1, p7 = make_sample_floor_history(1.5, 2.0, 3.0)
         mock_provider.get_collection_stats.return_value = CollectionStats(floor_price=curr_floor)
         mock_provider.get_floor_price_history.side_effect = lambda slug, timeframe="one_day": p1 if timeframe == "one_day" else p7
@@ -420,7 +420,7 @@ def test_acceptance_7_failure_isolation():
 
         mock_provider.get_collection.side_effect = get_col_side_effect
         mock_provider.get_active_listings_count.return_value = (200, False)
-        mock_provider.get_sale_events.return_value = make_sample_sales_events([1, 1, 1, 1, 1, 1, 1])
+        mock_provider.get_sale_events.return_value = make_sample_sales_events([1, 1, 1, 1, 1, 1, 1], price=1.45)
         curr_floor, p1, p7 = make_sample_floor_history(1.5, 2.0, 3.0)
         mock_provider.get_collection_stats.return_value = CollectionStats(floor_price=curr_floor)
         mock_provider.get_floor_price_history.side_effect = lambda slug, timeframe="one_day": p1 if timeframe == "one_day" else p7
@@ -484,7 +484,7 @@ def test_acceptance_8_long_running_multi_cycle_behavior():
         pass_col = make_realistic_passing_collection(slug="col-a", name="Col A")
         mock_provider.get_collection.side_effect = lambda slug: pass_col if slug == "col-a" else None
         mock_provider.get_active_listings_count.return_value = (200, False)
-        mock_provider.get_sale_events.return_value = make_sample_sales_events([1, 1, 1, 1, 1, 1, 1])
+        mock_provider.get_sale_events.return_value = make_sample_sales_events([1, 1, 1, 1, 1, 1, 1], price=1.45)
         curr_floor, p1, p7 = make_sample_floor_history(1.5, 2.0, 3.0)
         mock_provider.get_collection_stats.return_value = CollectionStats(floor_price=curr_floor)
         mock_provider.get_floor_price_history.side_effect = lambda slug, timeframe="one_day": p1 if timeframe == "one_day" else p7

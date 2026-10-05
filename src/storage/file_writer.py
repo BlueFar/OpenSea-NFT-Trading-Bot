@@ -72,6 +72,8 @@ def render_info_md(
         rec = sales_metrics.today_in_progress_record
         sales_table_rows.append(f"| {rec.date_str} | {rec.sales_transactions} | {rec.sales_items} | In-Progress (Today) |")
     sales_table_md = "\n".join(sales_table_rows)
+    fs = sales_metrics.floor_sales
+    floor_sales_str = fs.breakdown() if fs is not None else "Not measured (floor unknown)"
 
     # Floor metrics
     curr_floor_str = f"{floor_metrics.current_floor:.4f} {floor_metrics.floor_currency}" if floor_metrics.current_floor is not None else "UNKNOWN"
@@ -170,6 +172,7 @@ def render_info_md(
 - **Average Items Sold / Day**: {sales_metrics.average_sales_items_per_day:.2f}
 - **Maximum Transactions in One Day**: {sales_metrics.max_daily_transactions}
 - **Minimum Transactions in One Day**: {sales_metrics.min_daily_transactions}
+- **Bought at Floor Price**: {floor_sales_str}
 
 ### Daily Sales Breakdown ({tz_name} Midnight-to-Midnight):
 

@@ -34,7 +34,7 @@ def _passing_provider(floor=1.5, offer=0.9):
     provider = MagicMock()
     provider.get_collection.return_value = make_sample_collection(slug="snap-col", total_supply=10000)
     provider.get_active_listings_count.return_value = (300, False)
-    provider.get_sale_events.return_value = make_sample_sales_events([1, 1, 1, 1, 1, 1, 1])
+    provider.get_sale_events.return_value = make_sample_sales_events([1, 1, 1, 1, 1, 1, 1], price=floor * 0.97)
     provider.get_collection_stats.return_value = CollectionStats(floor_price=floor, floor_price_symbol="ETH")
     provider.get_top_offer.return_value = Offer(order_hash="0x1", chain="ethereum", price_value=offer, price_currency="WETH")
     return provider

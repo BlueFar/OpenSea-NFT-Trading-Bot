@@ -14,6 +14,7 @@ from ..metrics.calculator import (
 )
 from ..trade_model.calculator import compute_trade_economics
 from ..filters.engine import FilterEngine, sales_7d_count, too_few_sales_reason
+from ..metrics.floor_sales import classify_floor_sales, too_few_floor_sales_reason
 from ..utils.prices import prices_from_payment_tokens, usd_rate
 from ..storage.state_store import StateStore
 from ..storage.file_writer import write_candidate_info_md
@@ -106,7 +107,7 @@ class CollectionEvaluator:
 
     def _reject_early(self, slug: str, date_str: str, filter_name: str, reason: str,
                       ctx: Optional[Dict[str, Any]] = None, value: Any = None,
-                      limit_info: Optional[tuple] = None) -> None:
+                      limit_info: Optional[tuple] = None, keep_shortlisted: bool = False) -> None:
         """Records an early-exit rejection so the status funnel shows which filter is the bottleneck."""
         details = dict(ctx or {})
         details["rule"] = filter_name
@@ -117,8 +118,23 @@ class CollectionEvaluator:
             slug, date_str, is_pass=False, reasons=f"{filter_name}: {reason}",
             reject_filter=filter_name, details=details,
         )
-        if filter_name in ("project_age", "verification", "total_supply", "listed_items", "trading_frequency"):
+        if not keep_shortlisted and filter_name in ("project_age", "verification", "total_supply",
+                                                    "listed_items", "trading_frequency"):
             self.state_store.set_shortlisted(slug, False)
+
+    def _pace_limit(self, sales_metrics: SalesMetrics, value: Any) -> Tuple[Optional[float], str, str, Any]:
+        """Which part of Trading pace to show: sales per day, sales this week, or sales at floor price."""
+        cfg = self.config.filters.trading_frequency
+        pace = _num(value)
+        if pace is not None and pace > cfg.max_threshold:
+            return cfg.max_threshold, "max", "per day", value
+        week = sales_7d_count(sales_metrics, cfg.sale_count_mode)
+        if cfg.min_sales_7d > 0 and week < cfg.min_sales_7d:
+            return cfg.min_sales_7d, "min", "sales in 7 days", week
+        fs = sales_metrics.floor_sales
+        if cfg.min_floor_sales_7d > 0 and fs is not None and fs.floor_sales < cfg.min_floor_sales_7d:
+            return cfg.min_floor_sales_7d, "min", "floor sales in 7 days", fs.floor_sales
+        return cfg.max_threshold, "max", "per day", value
 
     def _floor_reference_points(self, slug: str, now_ts: int, timeframe: str,
                                 notes: Optional[List[str]] = None) -> List[FloorPricePoint]:
@@ -378,6 +394,31 @@ class CollectionEvaluator:
                 self._reject_early(slug, date_str, "floor_price", "current floor unavailable", ctx)
                 return None
 
+        # Trading pace, last part: were last week's sales bought at about the floor price, or were they
+        # all accepted offers? Uses the sales already downloaded and the bot's own floor snapshots.
+        groups = currency_groups(chain)
+        if sale_events is not None and current_floor:
+            window = 6 * 3600
+            floor_sales = classify_floor_sales(
+                sale_events, start_ts, end_ts, current_floor, floor_currency, groups,
+                self.state_store.get_floor_snapshots(slug, start_ts - window, end_ts + window),
+                min_pct=cfg_tf.floor_sale_min_pct, max_pct=cfg_tf.floor_sale_max_pct,
+                count_mode=cfg_tf.sale_count_mode,
+            )
+            sales_metrics.floor_sales = floor_sales
+            need = cfg_tf.min_floor_sales_7d
+            ctx["floor_sales"] = floor_sales.summary(need)
+            if need > 0 and floor_sales.floor_sales < need:
+                logger.info("[%s] %s", slug, floor_sales.breakdown())
+                if stop and self._enabled("trading_frequency"):
+                    if "trading_frequency" in ctx["checked"]:
+                        ctx["checked"].remove("trading_frequency")
+                    # Stays shortlisted: hourly floor snapshots keep building, so a floor sale later counts
+                    self._reject_early(slug, date_str, "trading_frequency",
+                                       too_few_floor_sales_reason(floor_sales, need), ctx, floor_sales.floor_sales,
+                                       limit_info=(need, "min", "floor sales in 7 days"), keep_shortlisted=True)
+                    return None
+
         for label, change, max_pct in (
             ("1d", floor_metrics.change_1d_abs_pct, filters.floor_change_1d.max_change_pct),
             ("7d", floor_metrics.change_7d_abs_pct, filters.floor_change_7d.max_change_pct),
@@ -400,7 +441,6 @@ class CollectionEvaluator:
         # -------------------------------------------------------------
         # STEP 5: Top Offer & Trade Economics
         # -------------------------------------------------------------
-        groups = currency_groups(chain)
         top_offer = self.provider.get_top_offer(
             slug, currency_filter=lambda cur: same_currency(cur, floor_currency, groups)
         )
@@ -453,7 +493,10 @@ class CollectionEvaluator:
             first_failed = failed[0] if failed else None
             if first_failed:
                 limit, kind, unit = self.rule_limits().get(first_failed, (None, "", ""))
-                details.update({"rule": first_failed, "value": _num(report.criteria[first_failed].actual_value),
+                value = _num(report.criteria[first_failed].actual_value)
+                if first_failed == "trading_frequency":
+                    limit, kind, unit, value = self._pace_limit(sales_metrics, value)
+                details.update({"rule": first_failed, "value": value,
                                 "limit": limit, "kind": kind, "unit": unit, "failed_rules": failed})
             if stop:
                 self.state_store.record_candidate(
@@ -525,10 +568,13 @@ class CollectionEvaluator:
         rules = {}
         for name, c in report.criteria.items():
             limit, kind, unit = limits.get(name, (None, "", ""))
+            value = _num(c.actual_value) if _num(c.actual_value) is not None else str(c.actual_value)
+            if name == "trading_frequency":
+                limit, kind, unit, value = self._pace_limit(sales_metrics, value)
             rules[name] = {
                 "result": c.result.value,
                 "enabled": self._enabled(name),
-                "value": _num(c.actual_value) if _num(c.actual_value) is not None else str(c.actual_value),
+                "value": value,
                 "limit": limit, "kind": kind, "unit": unit, "note": c.notes,
             }
         return {

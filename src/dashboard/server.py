@@ -489,7 +489,10 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         for key, field in RULE_LIMIT_FIELDS.items():
             rc = getattr(cfg.filters, key)
             rules[key] = {"enabled": bool(getattr(rc, "enabled", True)), "value": getattr(rc, field) if field else None}
-        rules["trading_frequency"]["min_sales_7d"] = cfg.filters.trading_frequency.min_sales_7d
+        tf = cfg.filters.trading_frequency
+        rules["trading_frequency"].update({"min_sales_7d": tf.min_sales_7d, "min_floor_sales_7d": tf.min_floor_sales_7d,
+                                           "floor_sale_min_pct": tf.floor_sale_min_pct,
+                                           "floor_sale_max_pct": tf.floor_sale_max_pct})
         tm = cfg.trade_model
         enabled = set(cfg.discovery.chains)
         chains = []
@@ -529,7 +532,9 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             f = float(v)
         except (TypeError, ValueError):
             raise ValueError(f"{name} must be a number")
-        if f < 0 or f != f:
+        if f != f or f in (float("inf"), float("-inf")):
+            raise ValueError(f"{name} must be a number")
+        if f < 0:
             raise ValueError(f"{name} can't be negative")
         return f
 
@@ -545,8 +550,10 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             field = RULE_LIMIT_FIELDS[key]
             if field and rule.get("value") is not None:
                 entry[field] = self._number(rule["value"], key)
-            if key == "trading_frequency" and rule.get("min_sales_7d") is not None:
-                entry["min_sales_7d"] = int(self._number(rule["min_sales_7d"], "sales in 7 days"))
+            if key == "trading_frequency":
+                for name, label in (("min_sales_7d", "sales in 7 days"), ("min_floor_sales_7d", "sales at floor price")):
+                    if rule.get(name) is not None:
+                        entry[name] = int(self._number(rule[name], label))
             filters[key] = entry
         if filters:
             out["filters"] = filters

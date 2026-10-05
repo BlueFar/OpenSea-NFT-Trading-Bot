@@ -29,6 +29,9 @@ filters:
     metric: "average_daily_sales"   # Options: average_daily_sales, max_daily_sales, both
     max_threshold: 2.0
     min_sales_7d: 1                  # At least this many sales in the last 7 days (0 = off)
+    min_floor_sales_7d: 1            # ...and at least this many bought at about the floor price (0 = off)
+    floor_sale_min_pct: 90.0         # Floor-price sale = paid 90-115% of the floor at the time of the sale.
+    floor_sale_max_pct: 115.0        # Lower is usually an accepted offer, higher usually a rare item.
     sale_count_mode: "transactions" # Options: transactions (default), item_quantity
   floor_change_1d:
     enabled: true

@@ -80,10 +80,15 @@ def test_no_sales_this_week_rejects_early_with_a_clear_reason():
 
 def test_week_minimum_off_or_rule_off_lets_quiet_collections_through():
     with tempfile.TemporaryDirectory() as d:
-        ev, _ = _evaluator(d, trading_frequency={"min_sales_7d": 0})
+        ev, _ = _evaluator(d, trading_frequency={"min_sales_7d": 0, "min_floor_sales_7d": 0})
         ev.provider.get_sale_events.return_value = make_sample_sales_events([0, 0, 0, 0, 0, 0, 0])
         report = ev.evaluate_collection("solitary-voyagers", dry_run=True, stop_on_first_failure=True)
         assert report is not None and report.criteria["trading_frequency"].result.value == "PASS"
+    with tempfile.TemporaryDirectory() as d:  # week minimum off, floor-price minimum still on
+        ev, store = _evaluator(d, trading_frequency={"min_sales_7d": 0})
+        ev.provider.get_sale_events.return_value = make_sample_sales_events([0, 0, 0, 0, 0, 0, 0])
+        assert ev.evaluate_collection("solitary-voyagers", dry_run=True, stop_on_first_failure=True) is None
+        assert store.get_results_since("2000-01-01")[0]["details"]["reason"] == "No sales at floor price in the last 7 days"
     with tempfile.TemporaryDirectory() as d:
         ev, _ = _evaluator(d, trading_frequency={"enabled": False})
         ev.provider.get_sale_events.return_value = make_sample_sales_events([0, 0, 0, 0, 0, 0, 0])

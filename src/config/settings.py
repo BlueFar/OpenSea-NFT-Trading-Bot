@@ -48,6 +48,10 @@ class TradingFrequencyFilterConfig(BaseModel):
     metric: str = "average_daily_sales"  # Options: average_daily_sales, max_daily_sales, both
     max_threshold: float = 2.0
     min_sales_7d: int = 1  # At least this many sales in the last 7 days (0 = off)
+    # At least this many of them bought at about the floor price, not by accepting the top offer (0 = off)
+    min_floor_sales_7d: int = 1
+    floor_sale_min_pct: float = 90.0   # a floor-price sale paid at least this % of the floor at the time...
+    floor_sale_max_pct: float = 115.0  # ...and at most this % (above it is usually a rare item)
     sale_count_mode: str = "transactions"  # Options: transactions, item_quantity
 
 class FloorChangeFilterConfig(BaseModel):

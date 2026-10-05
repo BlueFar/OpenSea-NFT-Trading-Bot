@@ -129,6 +129,15 @@ class StateStore:
                 return None
             return {"ts": row[0], "floor_price": row[1], "currency": row[2]}
 
+    def get_floor_snapshots(self, slug: str, from_ts: int, to_ts: int) -> List[Dict[str, Any]]:
+        """All snapshots for a collection between two times, oldest first."""
+        with self._get_connection() as conn:
+            rows = conn.execute("""
+                SELECT ts, floor_price, currency FROM floor_snapshots
+                WHERE slug=? AND ts BETWEEN ? AND ? ORDER BY ts ASC
+            """, (slug, int(from_ts), int(to_ts))).fetchall()
+        return [{"ts": r[0], "floor_price": r[1], "currency": r[2]} for r in rows]
+
     def set_shortlisted(self, slug: str, shortlisted: bool):
         """Marks whether a collection passed the cheap structural filters (age, verification, listings, frequency)."""
         with self._get_connection() as conn:

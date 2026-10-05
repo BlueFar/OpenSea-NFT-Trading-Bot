@@ -50,6 +50,7 @@ def make_sample_collection(
 def make_sample_sales_events(
     daily_sales: List[int],
     tz_name: str = "Asia/Kolkata",
+    price: float = 1.2,
 ) -> List[SaleEvent]:
     """
     Generates sale events for the last 7 complete calendar days.
@@ -75,7 +76,7 @@ def make_sample_sales_events(
                 quantity=1,
                 seller="0xseller",
                 buyer="0xbuyer",
-                price_value=1.2,
+                price_value=price,
                 price_currency="ETH",
             ))
     return events
