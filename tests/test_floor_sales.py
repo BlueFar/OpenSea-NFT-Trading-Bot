@@ -27,7 +27,8 @@ def classify(events, floor=1.0, snaps=(), mode="transactions"):
 
 
 def test_band_edges():
-    m = classify([sale(0, 0.899), sale(1, 0.90), sale(2, 1.15), sale(3, 1.151)])
+    before = [{"ts": START, "floor_price": 1.0, "currency": "ETH"}]
+    m = classify([sale(0, 0.899), sale(1, 0.90), sale(2, 1.15), sale(3, 1.151)], snaps=before)
     labels = {r.price: r.label for r in m.rows}
     assert labels == {0.899: "below", 0.90: "floor", 1.15: "floor", 1.151: "above"}
     assert (m.floor_sales, m.below, m.above, m.priced, m.total) == (2, 1, 1, 4, 4)
@@ -164,3 +165,39 @@ def test_settings_show_and_save_the_floor_sales_minimum(tmp_path):
         status, r = _call("POST", "/api/settings", cfg, store, ev, cfg_path,
                           {"rules": {"trading_frequency": {"min_floor_sales_7d": "Infinity"}}})
         assert status == 400
+
+
+def test_without_a_snapshot_before_the_sale_allow_for_the_floor_jump():
+    t = START + 2 * 86400
+    after = [{"ts": t + 600, "floor_price": 1.15, "currency": "ETH"}]  # floor rose once the cheapest listing sold
+    assert classify([sale(0, 1.0, ts=t)], snaps=after).rows[0].label == "floor"       # 87% of the floor after it
+    assert classify([sale(0, 0.75, ts=t)], snaps=after).rows[0].label == "below"      # an accepted offer
+    before = [{"ts": t - 600, "floor_price": 1.15, "currency": "ETH"}]
+    assert classify([sale(0, 1.0, ts=t)], snaps=before).rows[0].label == "below"      # strict band with a real 'before'
+
+
+def test_header_counts_use_one_unit_and_wash_only_weeks_say_so():
+    m = classify([sale(0, 1.0, tx="sweep"), sale(1, 1.0, tx="sweep"), sale(2, 0.5)])
+    assert (m.floor_sales, m.total, m.sale_rows) == (1, 2, 3)
+    m = classify([sale(0, 1.0, tx="sweep"), sale(1, 1.0, tx="sweep"), sale(2, 0.5)], mode="item_quantity")
+    assert (m.floor_sales, m.total) == (2, 3)
+    m = classify([sale(0, 1.0, seller="0xB", buyer="0xC"), sale(1, 1.0, seller="0xC", buyer="0xB")])
+    assert too_few_floor_sales_reason(m, 1) == "Only trades between the same wallets in the last 7 days"
+
+
+def test_failed_sales_download_still_shows_as_waiting_not_zero_sales():
+    with tempfile.TemporaryDirectory() as d:
+        ev, _ = _evaluator(d)
+        ev.provider.get_sale_events.return_value = None
+        ev.evaluate_collection("solitary-voyagers", dry_run=True, stop_on_first_failure=False)
+        rule = ev.last_details["rules"]["trading_frequency"]
+        assert rule["unit"] == "per day" and rule["value"] == "INSUFFICIENT_HISTORY"
+
+
+def test_floor_moves_are_reported_before_floor_sales():
+    with tempfile.TemporaryDirectory() as d:
+        ev, store = _evaluator(d)
+        ev.provider.get_floor_price_history.side_effect = lambda *a, **k: []  # no floor from a day ago yet
+        ev.provider.get_sale_events.return_value = make_sample_sales_events([1, 1, 1, 1, 1, 1, 1], price=0.81)
+        assert ev.evaluate_collection("solitary-voyagers", dry_run=True, stop_on_first_failure=True) is None
+        assert store.get_results_since("2000-01-01")[0]["reject_filter"] == "floor_history_1d"

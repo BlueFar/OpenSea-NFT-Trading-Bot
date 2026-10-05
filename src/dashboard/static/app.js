@@ -682,7 +682,8 @@
       return '<tr><td class="paid-day">' + esc(shortDay(r.ts)) + '</td><td class="paid-amt">' + (isNum(r.price) ? money(r.price, r.currency) : "–") + "</td>" +
         '<td class="paid-pct">' + pct + '</td><td><span class="pill ' + l[0] + '">' + l[1] + "</span></td></tr>";
     }).join("");
-    var more = fs.total > fs.rows.length ? '<p class="chart-note">Showing the latest ' + fs.rows.length + " of " + fs.total + " sales.</p>" : "";
+    var all = fs.sale_rows || fs.total;
+    var more = all > fs.rows.length ? '<p class="chart-note">Showing the latest ' + fs.rows.length + " of " + all + " sales.</p>" : "";
     return '<div class="card panel"><div class="section-title"><h2>What buyers paid</h2><span>' + esc(head) + "</span></div>" +
       '<table class="tbl paid"><thead><tr><th>Day</th><th>Paid</th><th>Of floor</th><th></th></tr></thead><tbody>' + rows + "</tbody></table>" + more +
       '<p class="chart-note">A floor-price sale paid ' + band + " of the floor at the time. Sales well below the floor are usually someone accepting an offer, " +

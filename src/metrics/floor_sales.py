@@ -45,14 +45,17 @@ class FloorSalesMetrics:
     below: int = 0
     above: int = 0
     skipped: int = 0
-    total: int = 0         # sales in the window (each sale once)
+    wash: int = 0          # skipped because the same wallets traded with each other
+    total: int = 0         # sales in the window, counted the same way as floor_sales
+    sale_rows: int = 0     # individual sale events in the window (one table row each)
     min_pct: float = 90.0
     max_pct: float = 115.0
     rows: List[SaleRow] = field(default_factory=list)
 
     def summary(self, needed: int) -> Dict:
         return {"count": self.floor_sales, "needed": needed, "priced": self.priced, "below": self.below,
-                "above": self.above, "skipped": self.skipped, "total": self.total,
+                "above": self.above, "skipped": self.skipped, "wash": self.wash, "total": self.total,
+                "sale_rows": self.sale_rows,
                 "min_pct": self.min_pct, "max_pct": self.max_pct,
                 "rows": [r.as_dict() for r in self.rows[:MAX_ROWS]]}
 
@@ -123,9 +126,15 @@ def classify_floor_sales(
 
     in_window = [ev for ev in deduplicate_sale_events(events) if start_ts <= ev.event_timestamp <= end_ts]
     wash = _wash_keys(in_window)
-    m = FloorSalesMetrics(min_pct=min_pct, max_pct=max_pct, total=len(in_window))
+    m = FloorSalesMetrics(min_pct=min_pct, max_pct=max_pct, sale_rows=len(in_window))
     floor_keys: Set[str] = set()
     floor_items = 0
+    all_keys = {ev.transaction or ev.order_hash or ev.event_id for ev in in_window}
+    m.total = sum(max(1, ev.quantity or 1) for ev in in_window) if count_mode == "item_quantity" else len(all_keys)
+    # Without a snapshot from just before the sale, the reference floor may already include the jump a floor
+    # buy causes (the cheapest listing is gone), so allow more room below before calling it an accepted offer.
+    # Offers sit at or under ~71% of the floor while the 40% spread rule is on, so 80% still keeps them out.
+    loose_min = min(min_pct, 80.0)
 
     for ev in sorted(in_window, key=lambda e: e.event_timestamp, reverse=True):
         qty = max(1, ev.quantity or 1)
@@ -138,12 +147,13 @@ def classify_floor_sales(
             row.note = "different coin"
         elif ev.event_id in wash:
             row.note = "same wallets on both sides"
+            m.wash += 1
         else:
             ref, source = _floor_at(ev.event_timestamp, snap_ts, snap_floor, window, current_floor)
             row.ref_floor, row.ref_source = ref, source
             row.pct = price / ref * 100.0
             m.priced += 1
-            if row.pct < min_pct:
+            if row.pct < (min_pct if source == "before" else loose_min):
                 row.label = BELOW
                 m.below += 1
             elif row.pct > max_pct:
@@ -163,6 +173,8 @@ def classify_floor_sales(
 
 def too_few_floor_sales_reason(fs: FloorSalesMetrics, needed: int) -> str:
     if fs.total and not fs.priced:
+        if fs.wash and fs.wash == fs.skipped:
+            return "Only trades between the same wallets in the last 7 days"
         return "Sale prices couldn't be compared with the floor"
     if fs.floor_sales == 0:
         return "No sales at floor price in the last 7 days"

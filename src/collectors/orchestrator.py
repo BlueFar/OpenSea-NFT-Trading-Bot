@@ -125,6 +125,8 @@ class CollectionEvaluator:
     def _pace_limit(self, sales_metrics: SalesMetrics, value: Any) -> Tuple[Optional[float], str, str, Any]:
         """Which part of Trading pace to show: sales per day, sales this week, or sales at floor price."""
         cfg = self.config.filters.trading_frequency
+        if sales_metrics.data_quality != DataQualityState.AVAILABLE:
+            return cfg.max_threshold, "max", "per day", value
         pace = _num(value)
         if pace is not None and pace > cfg.max_threshold:
             return cfg.max_threshold, "max", "per day", value
@@ -394,6 +396,25 @@ class CollectionEvaluator:
                 self._reject_early(slug, date_str, "floor_price", "current floor unavailable", ctx)
                 return None
 
+        for label, change, max_pct in (
+            ("1d", floor_metrics.change_1d_abs_pct, filters.floor_change_1d.max_change_pct),
+            ("7d", floor_metrics.change_7d_abs_pct, filters.floor_change_7d.max_change_pct),
+        ):
+            rule = f"floor_change_{label}"
+            if not self._enabled(rule):
+                continue
+            if change is None:
+                logger.info("[%s] Rejected: no floor reference from %s ago yet (bot floor history still building).", slug, label)
+                if stop:
+                    self._reject_early(slug, date_str, f"floor_history_{label}", f"no floor snapshot from {label} ago yet", ctx)
+                    return None
+            elif change >= max_pct:
+                logger.info("[%s] Rejected: %s floor change %.2f%% (>= %.2f%%)", slug, label, change, max_pct)
+                if stop:
+                    self._reject_early(slug, date_str, rule, f"{change:.2f}%", ctx, change)
+                    return None
+            ctx["checked"].append(rule)
+
         # Trading pace, last part: were last week's sales bought at about the floor price, or were they
         # all accepted offers? Uses the sales already downloaded and the bot's own floor snapshots.
         groups = currency_groups(chain)
@@ -418,25 +439,6 @@ class CollectionEvaluator:
                                        too_few_floor_sales_reason(floor_sales, need), ctx, floor_sales.floor_sales,
                                        limit_info=(need, "min", "floor sales in 7 days"), keep_shortlisted=True)
                     return None
-
-        for label, change, max_pct in (
-            ("1d", floor_metrics.change_1d_abs_pct, filters.floor_change_1d.max_change_pct),
-            ("7d", floor_metrics.change_7d_abs_pct, filters.floor_change_7d.max_change_pct),
-        ):
-            rule = f"floor_change_{label}"
-            if not self._enabled(rule):
-                continue
-            if change is None:
-                logger.info("[%s] Rejected: no floor reference from %s ago yet (bot floor history still building).", slug, label)
-                if stop:
-                    self._reject_early(slug, date_str, f"floor_history_{label}", f"no floor snapshot from {label} ago yet", ctx)
-                    return None
-            elif change >= max_pct:
-                logger.info("[%s] Rejected: %s floor change %.2f%% (>= %.2f%%)", slug, label, change, max_pct)
-                if stop:
-                    self._reject_early(slug, date_str, rule, f"{change:.2f}%", ctx, change)
-                    return None
-            ctx["checked"].append(rule)
 
         # -------------------------------------------------------------
         # STEP 5: Top Offer & Trade Economics
