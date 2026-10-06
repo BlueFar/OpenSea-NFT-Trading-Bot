@@ -23,7 +23,7 @@ class SalesMetrics:
     today_in_progress_record: Optional[DailySalesRecord] = None
     data_quality: DataQualityState = DataQualityState.AVAILABLE
     floor_sales: Optional[Any] = None
-    offer_sales: Optional[Any] = None  # FloorSalesMetrics once the floor is known (src/metrics/floor_sales.py)
+    offer_sales: Optional[Any] = None  # OfferSalesMetrics once the floor is known (src/metrics/floor_sales.py)
 
 @dataclass
 class FloorPriceMetrics:

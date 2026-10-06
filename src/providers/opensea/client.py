@@ -146,6 +146,9 @@ class OpenSeaClient:
                     self._sleep(wait_time)
                     continue
 
+                if resp.status_code == 400 and "/orders/" in path:
+                    logger.debug("OpenSea order not found: %s", path)  # common for older or other-market sales
+                    return None
                 logger.warning("OpenSea unexpected HTTP %d: %s", resp.status_code, resp.text[:200])
                 return None
 

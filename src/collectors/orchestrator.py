@@ -82,6 +82,7 @@ class CollectionEvaluator:
         self.filter_engine = FilterEngine(config.filters)
         self.last_details: Optional[Dict[str, Any]] = None  # details of the latest full evaluation
         self._prices_saved_at: Dict[str, float] = {}
+        self._older_sales: Dict[str, Tuple[Tuple[int, int], List[SaleEvent]]] = {}
         try:  # dollar prices seen before, until this run sees fresh ones
             self._last_prices: Dict[str, float] = {k: v["usd"] for k, v in state_store.get_usd_prices().items()}
         except Exception:
@@ -194,18 +195,19 @@ class CollectionEvaluator:
                 return None  # ERC1155 ranks are over editions, not items, so "rarest 10%" doesn't fit
             now = time.time()
             cached = ranks.get(key)
-            if cached and now - (cached["checked_at"] or 0) < RARITY_REFRESH_SECONDS:
-                return cached["rank"]
+            if cached:
+                failed = cached["rank"] == -1  # OpenSea couldn't return the item last time: ask again after a day
+                if now - (cached["checked_at"] or 0) < (UNKNOWN_ORDER_RETRY_SECONDS if failed else RARITY_REFRESH_SECONDS):
+                    return None if failed else cached["rank"]
             if budget["rarity"] <= 0:
                 return None
             budget["rarity"] -= 1
             res = get_rarity(ev.chain, ev.contract_address, ev.token_id)
             ok, rank = res if isinstance(res, tuple) and len(res) == 2 else (False, None)
             rank = rank if isinstance(rank, int) else None
-            if ok:
-                self.state_store.set_rarity(key, rank)
-                ranks[key] = {"rank": rank, "checked_at": int(now)}
-            return rank
+            self.state_store.set_rarity(key, rank if ok else -1)
+            ranks[key] = {"rank": rank if ok else -1, "checked_at": int(now)}
+            return rank if ok else None
 
         return order_info, rarity_rank
 
@@ -535,9 +537,18 @@ class CollectionEvaluator:
             offer_sales = offer_sales_in(events14)
             older_failed = False
             if offer_sales.offer_sales < need_os:
-                older = self.provider.get_sale_events(slug, after_timestamp=start14, before_timestamp=start_ts,
-                                                      max_pages=5)
-                if older is None:
+                # Sales from 8-14 days ago don't change, so they are downloaded once a day per collection
+                cached = self._older_sales.get(slug)
+                if cached and cached[0] == (start14, start_ts):
+                    older = cached[1]
+                else:
+                    older = self.provider.get_sale_events(slug, after_timestamp=start14, before_timestamp=start_ts,
+                                                          max_pages=5)
+                    if isinstance(older, list):
+                        if len(self._older_sales) > 5000:
+                            self._older_sales.clear()
+                        self._older_sales[slug] = ((start14, start_ts), older)
+                if not isinstance(older, list):
                     older_failed = True
                 else:
                     events14 = older + events14
@@ -545,14 +556,17 @@ class CollectionEvaluator:
             sales_metrics.offer_sales = offer_sales
             ctx["offer_sales"] = offer_sales.summary(need_os)
             if offer_sales.offer_sales < need_os:
-                reason = ("Sales from 8-14 days ago couldn't be downloaded" if older_failed
+                reason = ("sale events API failed (8-14 days ago)" if older_failed
                           else too_few_offer_sales_reason(offer_sales, need_os))
                 logger.info("[%s] %s", slug, reason)
                 if stop and self._enabled("trading_frequency"):
                     if "trading_frequency" in ctx["checked"]:
                         ctx["checked"].remove("trading_frequency")
-                    self._reject_early(slug, date_str, "trading_frequency", reason, ctx, offer_sales.offer_sales,
-                                       limit_info=(need_os, "min", "offer sales in 14 days"), keep_shortlisted=True)
+                    # A failed download is not a near miss: no limit is shown for it
+                    limit_info = (None, "", "") if older_failed else (need_os, "min", "offer sales in 14 days")
+                    self._reject_early(slug, date_str, "trading_frequency", reason, ctx,
+                                       None if older_failed else offer_sales.offer_sales,
+                                       limit_info=limit_info, keep_shortlisted=True)
                     return None
 
         # -------------------------------------------------------------
@@ -631,6 +645,8 @@ class CollectionEvaluator:
         # -------------------------------------------------------------
         if self.state_store.is_candidate_recorded_today(slug, date_str):
             logger.info("[%s] Already recorded as candidate for today (%s). Skipping duplicate file creation.", slug, date_str)
+            if stop:
+                self.state_store.set_last_result_pass(slug)  # passing again after a failed check earlier today
             return report
 
         if dry_run:

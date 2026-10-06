@@ -44,6 +44,7 @@ class SaleRow:
     note: str = ""
     how: str = ""               # "listing" / "offer" when OpenSea's order says so, "" = not looked up or unknown
     rank: Optional[int] = None  # rarity rank when looked up (1 = rarest)
+    event: Optional[SaleEvent] = field(default=None, repr=False, compare=False)
 
     def as_dict(self) -> Dict:
         return {"ts": self.ts, "price": self.price, "currency": self.currency, "ref_floor": self.ref_floor,
@@ -178,7 +179,7 @@ def classify_floor_sales(
         qty = max(1, ev.quantity or 1)
         price = ev.price_value / qty if ev.price_value is not None else None
         row = SaleRow(ts=ev.event_timestamp, price=price, currency=ev.price_currency,
-                      ref_floor=None, ref_source="", pct=None, label=SKIPPED)
+                      ref_floor=None, ref_source="", pct=None, label=SKIPPED, event=ev)
         if price is None or price <= 0:
             row.note = "no price"
         elif not same_currency(ev.price_currency, floor_currency, currency_groups):
@@ -274,20 +275,12 @@ def classify_offer_sales(
                               min_pct=min_pct, max_pct=max_pct, count_mode=count_mode, window_hours=window_hours)
     if fs is None:
         return None
-    by_ts: Dict[int, List[SaleEvent]] = {}
-    for ev in deduplicate_sale_events(events or []):
-        if start_ts <= ev.event_timestamp <= end_ts:
-            by_ts.setdefault(ev.event_timestamp, []).append(ev)
     m = OfferSalesMetrics(total=fs.total, days=days)
     keys: Set[str] = set()
     items = 0
-    used: Set[str] = set()
-    for row in fs.rows:  # newest first, same order as the sales were labelled
-        ev = next((e for e in by_ts.get(row.ts, []) if e.event_id not in used), None)
-        if ev is None:
-            continue
-        used.add(ev.event_id)
-        if row.label not in (BELOW, FLOOR):
+    for row in fs.rows:  # newest first
+        ev = row.event
+        if ev is None or row.label not in (BELOW, FLOOR):
             continue
         info = order_info(ev) if order_info else None
         kind = (info or {}).get("kind")
@@ -296,7 +289,9 @@ def classify_offer_sales(
                 m.other_offers += 1
                 continue
             m.confirmed += 1
-        elif kind is None and row.label == BELOW:
+        elif kind is None and row.label == BELOW and (row.ref_source != "now" or (row.pct or 100) < 75):
+            # Compared with today's floor (no saved floor from then), a listing bought at the old floor can look
+            # "below" after the floor rose, so only a price far under today's floor counts without the order.
             m.by_price += 1
         else:
             continue

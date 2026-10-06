@@ -116,7 +116,7 @@ class FloorHistoryConfig(BaseModel):
 class SchedulerConfig(BaseModel):
     discovery_interval_seconds: int = 3600
     candidate_refresh_interval_seconds: int = 300
-    request_delay_seconds: float = 0.5
+    request_delay_seconds: float = 0.6  # 100 requests a minute at most, under the key's 120
     rate_limit_backoff_factor: float = 2.0
     max_retries: int = 5
     evaluations_per_cycle: int = 40

@@ -89,7 +89,7 @@ scheduler:
   evaluations_per_cycle: 40         # Collections evaluated per refresh cycle
   shortlist_refresh_seconds: 10800  # Collections passing age/verified/listings/frequency are re-checked this often (3h is
                                     # enough for the 1-day and 7-day floor references and the floor at each sale)
-  request_delay_seconds: 0.5        # Polite spacing between API calls
+  request_delay_seconds: 0.6        # Polite spacing between API calls (max 100 a minute; the key allows 120)
   rate_limit_backoff_factor: 2.0
   max_retries: 5
 

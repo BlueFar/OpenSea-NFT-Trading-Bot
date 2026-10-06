@@ -197,7 +197,7 @@ def parse_order_info(data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Optio
 
     crit = order.get("criteria")
     if isinstance(crit, dict):
-        if crit.get("traits") or crit.get("numeric_traits"):
+        if crit.get("traits") or crit.get("numeric_traits") or crit.get("trait"):
             offer_type = "trait"
         elif crit.get("encoded_token_ids") in (None, "*"):
             offer_type = "collection"

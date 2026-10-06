@@ -301,3 +301,36 @@ def test_candidates_endpoint_sends_latest_and_home_counts_only_still_passing(tmp
         assert status == 200 and set(r["latest"]) == {"a", "b"} and r["latest"]["b"]["pass"] is False
         status, o = _call("GET", "/api/overview", cfg, store, ev, cfg_path)
         assert status == 200 and o["candidates_7d"] == 1
+
+
+def test_review_fixes_old_sales_trait_shape_and_passing_again(tmp_path):
+    # Compared only with today's floor, a sale at 78% may be a listing bought before the floor rose: not counted
+    assert offers([sale(0, 0.78)]).offer_sales == 0
+    assert offers([sale(0, 0.70)]).offer_sales == 1
+    # Older criteria shape with a single trait is a trait offer
+    old = _order(1, {"collection": {"slug": "x"}, "trait": {"type": "Hat", "value": "Cap"}, "encoded_token_ids": None},
+                 {"itemType": 4, "identifierOrCriteria": "55"})
+    assert parse_order_info(old)["offer_type"] == "trait"
+    # Pass, fail, pass again on the same day: the latest result is a pass
+    store = StateStore(str(tmp_path / "bot.db"))
+    store.add_discovered_slugs(["a"])
+    store.record_candidate("a", "2026-10-06", is_pass=True, reasons="PASS", details={})
+    store.record_candidate("a", "2026-10-06", is_pass=False, reasons="x", reject_filter="floor_change_1d", details={})
+    store.set_last_result_pass("a")
+    assert store.get_latest_results(["a"])["a"]["pass"] is True
+
+
+def test_failed_older_download_is_not_a_near_miss_and_rarity_misses_wait_a_day():
+    with tempfile.TemporaryDirectory() as d:
+        ev, store = _evaluator(d)
+        week = make_sample_sales_events([1, 1, 1, 1, 1, 1, 1], price=1.2)
+        ev.provider.get_sale_events.side_effect = lambda slug, after_timestamp, before_timestamp=None, **kw: (
+            None if before_timestamp else week)
+        ev.provider.get_nft_rarity.return_value = (False, None)
+        assert ev.evaluate_collection("solitary-voyagers", dry_run=True, stop_on_first_failure=True) is None
+        det = store.get_results_since("2000-01-01")[0]["details"]
+        assert det["limit"] is None and "API failed" in det["reason"]
+        calls = ev.provider.get_nft_rarity.call_count
+        assert calls > 0
+        ev.evaluate_collection("solitary-voyagers", dry_run=True, stop_on_first_failure=True)
+        assert ev.provider.get_nft_rarity.call_count == calls   # the miss is remembered

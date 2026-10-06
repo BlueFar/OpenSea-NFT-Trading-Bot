@@ -339,6 +339,16 @@ class StateStore:
             """, (1 if is_pass else 0, None if is_pass else reject_filter, reason, now, slug))
             conn.commit()
 
+    def set_last_result_pass(self, slug: str):
+        """A check passed again on a day that already has a pass recorded (nothing else is written)."""
+        with self._get_connection() as conn:
+            conn.execute("""
+                UPDATE monitored_collections
+                SET last_result_pass=1, last_result_rule=NULL, last_result_reason=NULL, last_result_at=?
+                WHERE slug=?
+            """, (datetime.now(timezone.utc).isoformat(), slug))
+            conn.commit()
+
     def get_latest_results(self, slugs: Iterable[str]) -> Dict[str, Dict[str, Any]]:
         """slug -> when it was last checked and how that check ended."""
         slugs = list(dict.fromkeys(slugs))
