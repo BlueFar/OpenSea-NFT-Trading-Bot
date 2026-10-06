@@ -52,6 +52,10 @@ class TradingFrequencyFilterConfig(BaseModel):
     min_floor_sales_7d: int = 1
     floor_sale_min_pct: float = 90.0   # a floor-price sale paid at least this % of the floor at the time...
     floor_sale_max_pct: float = 115.0  # ...and at most this % (above it is usually a rare item)
+    # A floor-price sale of an item in the rarest this % of the collection doesn't count (0 = off)
+    rare_item_pct: float = 10.0
+    # At least this many sales where a seller accepted a collection offer in the last 14 days (0 = off)
+    min_offer_sales_14d: int = 1
     sale_count_mode: str = "transactions"  # Options: transactions, item_quantity
 
 class FloorChangeFilterConfig(BaseModel):
@@ -115,8 +119,8 @@ class SchedulerConfig(BaseModel):
     request_delay_seconds: float = 0.5
     rate_limit_backoff_factor: float = 2.0
     max_retries: int = 5
-    evaluations_per_cycle: int = 10
-    shortlist_refresh_seconds: int = 3600  # Re-check collections that passed the cheap filters this often
+    evaluations_per_cycle: int = 40
+    shortlist_refresh_seconds: int = 10800  # Re-check collections that passed the cheap filters this often
 
 class RuntimeConfig(BaseModel):
     wait_for_internet: bool = True            # Pause while offline instead of skipping collections

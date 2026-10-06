@@ -10,7 +10,7 @@ from ..models.filters import (
     FilterEvaluationReport,
 )
 from ..config.settings import FiltersConfig
-from ..metrics.floor_sales import too_few_floor_sales_reason
+from ..metrics.floor_sales import too_few_floor_sales_reason, too_few_offer_sales_reason
 
 class FilterEngine:
     """Evaluates candidate collections against deterministic quantitative filters."""
@@ -285,6 +285,20 @@ class FilterEngine:
                     notes = too_few_floor_sales_reason(fs, cfg.min_floor_sales_7d) + ". " + notes
         if fs is not None:
             notes += " " + fs.breakdown() + "."
+
+        # Did sellers accept collection offers (the bid this strategy places) in the last 14 days?
+        os_ = sales_metrics.offer_sales
+        if cfg.min_offer_sales_14d > 0:
+            threshold += f" and >= {cfg.min_offer_sales_14d} sales to a collection offer in 14 days"
+            if os_ is None:
+                notes += " Offer sales not measured (floor unknown)."
+            elif os_.offer_sales < cfg.min_offer_sales_14d:
+                is_pass = False
+                if not too_few and not (fs is not None and cfg.min_floor_sales_7d > 0
+                                        and fs.floor_sales < cfg.min_floor_sales_7d):
+                    notes = too_few_offer_sales_reason(os_, cfg.min_offer_sales_14d) + ". " + notes
+        if os_ is not None:
+            notes += f" {os_.offer_sales} {'sale' if os_.offer_sales == 1 else 'sales'} to a collection offer in {os_.days} days."
 
         return FilterCriterionResult(
             name="trading_frequency",

@@ -1,4 +1,5 @@
 import sqlite3
+import time
 import os
 import json
 from typing import Optional, Dict, Any, List, Iterable
@@ -77,6 +78,28 @@ class StateStore:
             self._add_column_if_missing(cursor, "candidate_history", "details", "TEXT")
             self._add_column_if_missing(cursor, "monitored_collections", "chain", "TEXT")
             self._add_column_if_missing(cursor, "monitored_collections", "safelist_status", "TEXT")
+            # Latest check result, whatever the day (candidate_history keeps a day's pass even if a later check fails)
+            self._add_column_if_missing(cursor, "monitored_collections", "last_result_pass", "INTEGER")
+            self._add_column_if_missing(cursor, "monitored_collections", "last_result_rule", "TEXT")
+            self._add_column_if_missing(cursor, "monitored_collections", "last_result_reason", "TEXT")
+            self._add_column_if_missing(cursor, "monitored_collections", "last_result_at", "TIMESTAMP")
+            # How each sale happened (listing bought or offer accepted), looked up once per order
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sale_orders (
+                    order_hash TEXT PRIMARY KEY,
+                    kind TEXT,
+                    offer_type TEXT,
+                    checked_at INTEGER
+                )
+            """)
+            # OpenSea rarity rank per item (rank NULL = the collection has no rarity data)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS nft_rarity (
+                    item_key TEXT PRIMARY KEY,
+                    rank INTEGER,
+                    checked_at INTEGER
+                )
+            """)
             # Plain-language activity shown on the dashboard (bot started, internet lost, ...)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS bot_events (
@@ -308,6 +331,65 @@ class StateStore:
                 WHERE candidate_history.is_pass = 0 OR excluded.is_pass = 1
             """, (slug, date_str, 1 if is_pass else 0, reasons, now, None if is_pass else reject_filter,
                   json.dumps(details, default=str) if details is not None else None))
+            reason = None if is_pass else ((details or {}).get("reason") or reasons)
+            c.execute("""
+                UPDATE monitored_collections
+                SET last_result_pass=?, last_result_rule=?, last_result_reason=?, last_result_at=?
+                WHERE slug=?
+            """, (1 if is_pass else 0, None if is_pass else reject_filter, reason, now, slug))
+            conn.commit()
+
+    def get_latest_results(self, slugs: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+        """slug -> when it was last checked and how that check ended."""
+        slugs = list(dict.fromkeys(slugs))
+        out: Dict[str, Dict[str, Any]] = {}
+        with self._get_connection() as conn:
+            for i in range(0, len(slugs), 500):
+                part = slugs[i:i + 500]
+                rows = conn.execute(f"""
+                    SELECT slug, last_evaluated_at, last_result_pass, last_result_rule, last_result_reason, last_result_at
+                    FROM monitored_collections WHERE slug IN ({','.join('?' * len(part))})
+                """, part).fetchall()
+                for r in rows:
+                    out[r[0]] = {"last_checked": r[1], "pass": None if r[2] is None else bool(r[2]),
+                                 "rule": r[3], "reason": r[4], "at": r[5]}
+        return out
+
+    # ------------------------------------------------------------------
+    # Sale lookups (cached: a sale's order and an item's rarity don't change)
+    # ------------------------------------------------------------------
+    def get_sale_orders(self, order_hashes: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+        hashes = [h for h in dict.fromkeys(order_hashes) if h]
+        out: Dict[str, Dict[str, Any]] = {}
+        with self._get_connection() as conn:
+            for i in range(0, len(hashes), 500):
+                part = hashes[i:i + 500]
+                for r in conn.execute(f"SELECT order_hash, kind, offer_type, checked_at FROM sale_orders "
+                                      f"WHERE order_hash IN ({','.join('?' * len(part))})", part):
+                    out[r[0]] = {"kind": r[1], "offer_type": r[2], "checked_at": r[3]}
+        return out
+
+    def set_sale_order(self, order_hash: str, kind: Optional[str], offer_type: Optional[str] = None):
+        with self._get_connection() as conn:
+            conn.execute("INSERT OR REPLACE INTO sale_orders (order_hash, kind, offer_type, checked_at) VALUES (?, ?, ?, ?)",
+                         (order_hash, kind, offer_type, int(time.time())))
+            conn.commit()
+
+    def get_rarity(self, item_keys: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+        keys = [k for k in dict.fromkeys(item_keys) if k]
+        out: Dict[str, Dict[str, Any]] = {}
+        with self._get_connection() as conn:
+            for i in range(0, len(keys), 500):
+                part = keys[i:i + 500]
+                for r in conn.execute(f"SELECT item_key, rank, checked_at FROM nft_rarity "
+                                      f"WHERE item_key IN ({','.join('?' * len(part))})", part):
+                    out[r[0]] = {"rank": r[1], "checked_at": r[2]}
+        return out
+
+    def set_rarity(self, item_key: str, rank: Optional[int]):
+        with self._get_connection() as conn:
+            conn.execute("INSERT OR REPLACE INTO nft_rarity (item_key, rank, checked_at) VALUES (?, ?, ?)",
+                         (item_key, rank, int(time.time())))
             conn.commit()
 
     # ------------------------------------------------------------------

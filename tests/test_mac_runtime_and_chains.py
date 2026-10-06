@@ -82,7 +82,7 @@ def _evaluator(temp_dir, listed=250, **filter_overrides):
     provider = MagicMock()
     provider.get_collection.return_value = make_realistic_passing_collection()
     provider.get_active_listings_count.return_value = (listed, False)
-    provider.get_sale_events.return_value = make_sample_sales_events([1, 1, 1, 1, 1, 1, 1])
+    provider.get_sale_events.return_value = make_sample_sales_events([1, 1, 1, 1, 1, 1, 1], offer_price=0.5)
     curr_floor, p1, p7 = make_sample_floor_history(1.25, 2.0, 3.0)
     provider.get_collection_stats.return_value = CollectionStats(floor_price=curr_floor)
     provider.get_floor_price_history.side_effect = lambda slug, timeframe="one_day": p1 if timeframe == "one_day" else p7

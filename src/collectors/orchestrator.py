@@ -3,7 +3,7 @@ import time
 from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timezone
 from ..providers.base import CollectionDataProvider
-from ..models.collection import CollectionMetadata, FloorPricePoint
+from ..models.collection import CollectionMetadata, FloorPricePoint, SaleEvent
 from ..models.metrics import ListingMetrics, SalesMetrics, FloorPriceMetrics
 from ..models.trade import TradeEconomics
 from ..models.filters import FilterEvaluationReport, FilterResultStatus, DataQualityState
@@ -14,7 +14,9 @@ from ..metrics.calculator import (
 )
 from ..trade_model.calculator import compute_trade_economics
 from ..filters.engine import FilterEngine, sales_7d_count, too_few_sales_reason
-from ..metrics.floor_sales import classify_floor_sales, too_few_floor_sales_reason
+from ..metrics.floor_sales import (
+    classify_floor_sales, classify_offer_sales, too_few_floor_sales_reason, too_few_offer_sales_reason,
+)
 from ..utils.prices import prices_from_payment_tokens, usd_rate
 from ..storage.state_store import StateStore
 from ..storage.file_writer import write_candidate_info_md
@@ -37,6 +39,19 @@ RULE_ORDER = [
     "project_age", "verification", "listed_items", "trading_frequency",
     "floor_change_1d", "floor_change_7d", "offer_to_floor", "net_profit",
 ]
+
+# New OpenSea lookups allowed per check; answers are saved, so later checks only look up new sales
+ORDER_LOOKUPS_PER_CHECK = 20
+RARITY_LOOKUPS_PER_CHECK = 10
+UNKNOWN_ORDER_RETRY_SECONDS = 86400       # an order OpenSea couldn't return is asked for again after a day
+RARITY_REFRESH_SECONDS = 30 * 86400
+MIN_SUPPLY_FOR_RARITY = 20                # rarity ranks mean little in a tiny collection
+
+
+def _item_key(ev: SaleEvent) -> Optional[str]:
+    if ev.chain and ev.contract_address and ev.token_id is not None:
+        return f"{ev.chain}:{ev.contract_address.lower()}:{ev.token_id}"
+    return None
 
 
 def _num(v: Any) -> Optional[float]:
@@ -136,7 +151,63 @@ class CollectionEvaluator:
         fs = sales_metrics.floor_sales
         if cfg.min_floor_sales_7d > 0 and fs is not None and fs.floor_sales < cfg.min_floor_sales_7d:
             return cfg.min_floor_sales_7d, "min", "floor sales in 7 days", fs.floor_sales
+        os_ = sales_metrics.offer_sales
+        if cfg.min_offer_sales_14d > 0 and os_ is not None and os_.offer_sales < cfg.min_offer_sales_14d:
+            return cfg.min_offer_sales_14d, "min", "offer sales in 14 days", os_.offer_sales
         return cfg.max_threshold, "max", "per day", value
+
+    def _sale_lookups(self, events: List[SaleEvent]):
+        """
+        How each sale happened and how rare the item is, for one check. Saved answers are used first;
+        at most ORDER_LOOKUPS_PER_CHECK / RARITY_LOOKUPS_PER_CHECK new OpenSea calls are made.
+        """
+        orders = self.state_store.get_sale_orders(e.order_hash for e in events if e.order_hash)
+        ranks = self.state_store.get_rarity(k for k in (_item_key(e) for e in events) if k)
+        budget = {"orders": ORDER_LOOKUPS_PER_CHECK, "rarity": RARITY_LOOKUPS_PER_CHECK}
+        get_order = getattr(self.provider, "get_order_info", None)
+        get_rarity = getattr(self.provider, "get_nft_rarity", None)
+
+        def order_info(ev: SaleEvent) -> Optional[Dict[str, Any]]:
+            h = ev.order_hash
+            if not h or not ev.protocol_address or not ev.chain or get_order is None:
+                return None
+            now = time.time()
+            cached = orders.get(h)
+            if cached and (cached["kind"] in ("listing", "offer")
+                           or now - (cached["checked_at"] or 0) < UNKNOWN_ORDER_RETRY_SECONDS):
+                return {"kind": cached["kind"], "offer_type": cached["offer_type"]} \
+                    if cached["kind"] in ("listing", "offer") else None
+            if budget["orders"] <= 0:
+                return None
+            budget["orders"] -= 1
+            info = get_order(ev.chain, ev.protocol_address, h)
+            info = info if isinstance(info, dict) else None
+            kind = (info or {}).get("kind") or "unknown"
+            offer_type = (info or {}).get("offer_type")
+            self.state_store.set_sale_order(h, kind, offer_type)
+            orders[h] = {"kind": kind, "offer_type": offer_type, "checked_at": int(now)}
+            return info
+
+        def rarity_rank(ev: SaleEvent) -> Optional[int]:
+            key = _item_key(ev)
+            if not key or (ev.token_standard or "").lower() == "erc1155" or get_rarity is None:
+                return None  # ERC1155 ranks are over editions, not items, so "rarest 10%" doesn't fit
+            now = time.time()
+            cached = ranks.get(key)
+            if cached and now - (cached["checked_at"] or 0) < RARITY_REFRESH_SECONDS:
+                return cached["rank"]
+            if budget["rarity"] <= 0:
+                return None
+            budget["rarity"] -= 1
+            res = get_rarity(ev.chain, ev.contract_address, ev.token_id)
+            ok, rank = res if isinstance(res, tuple) and len(res) == 2 else (False, None)
+            rank = rank if isinstance(rank, int) else None
+            if ok:
+                self.state_store.set_rarity(key, rank)
+                ranks[key] = {"rank": rank, "checked_at": int(now)}
+            return rank
+
+        return order_info, rarity_rank
 
     def _floor_reference_points(self, slug: str, now_ts: int, timeframe: str,
                                 notes: Optional[List[str]] = None) -> List[FloorPricePoint]:
@@ -418,13 +489,18 @@ class CollectionEvaluator:
         # Trading pace, last part: were last week's sales bought at about the floor price, or were they
         # all accepted offers? Uses the sales already downloaded and the bot's own floor snapshots.
         groups = currency_groups(chain)
+        lookups = None
         if sale_events is not None and current_floor:
             window = 6 * 3600
+            lookups = self._sale_lookups(sale_events)
             floor_sales = classify_floor_sales(
                 sale_events, start_ts, end_ts, current_floor, floor_currency, groups,
                 self.state_store.get_floor_snapshots(slug, start_ts - window, end_ts + window),
                 min_pct=cfg_tf.floor_sale_min_pct, max_pct=cfg_tf.floor_sale_max_pct,
                 count_mode=cfg_tf.sale_count_mode,
+                order_info=lookups[0], rarity_rank=lookups[1],
+                supply=total_supply if (total_supply or 0) >= MIN_SUPPLY_FOR_RARITY else None,
+                rare_pct=cfg_tf.rare_item_pct,
             )
             sales_metrics.floor_sales = floor_sales
             need = cfg_tf.min_floor_sales_7d
@@ -438,6 +514,45 @@ class CollectionEvaluator:
                     self._reject_early(slug, date_str, "trading_frequency",
                                        too_few_floor_sales_reason(floor_sales, need), ctx, floor_sales.floor_sales,
                                        limit_info=(need, "min", "floor sales in 7 days"), keep_shortlisted=True)
+                    return None
+
+        # Trading pace, the other side: did any seller accept a collection offer (the bid this strategy
+        # places) in the last 14 days? The week before the 7 days above is downloaded only when needed.
+        need_os = cfg_tf.min_offer_sales_14d
+        if sale_events is not None and current_floor and need_os > 0:
+            window = 6 * 3600
+            start14 = start_ts - 7 * 86400
+            events14 = list(sale_events)
+
+            def offer_sales_in(evs):
+                return classify_offer_sales(
+                    evs, start14, end_ts, current_floor, floor_currency, groups,
+                    self.state_store.get_floor_snapshots(slug, start14 - window, end_ts + window),
+                    min_pct=cfg_tf.floor_sale_min_pct, max_pct=cfg_tf.floor_sale_max_pct,
+                    count_mode=cfg_tf.sale_count_mode, order_info=lookups[0],
+                )
+
+            offer_sales = offer_sales_in(events14)
+            older_failed = False
+            if offer_sales.offer_sales < need_os:
+                older = self.provider.get_sale_events(slug, after_timestamp=start14, before_timestamp=start_ts,
+                                                      max_pages=5)
+                if older is None:
+                    older_failed = True
+                else:
+                    events14 = older + events14
+                    offer_sales = offer_sales_in(events14)
+            sales_metrics.offer_sales = offer_sales
+            ctx["offer_sales"] = offer_sales.summary(need_os)
+            if offer_sales.offer_sales < need_os:
+                reason = ("Sales from 8-14 days ago couldn't be downloaded" if older_failed
+                          else too_few_offer_sales_reason(offer_sales, need_os))
+                logger.info("[%s] %s", slug, reason)
+                if stop and self._enabled("trading_frequency"):
+                    if "trading_frequency" in ctx["checked"]:
+                        ctx["checked"].remove("trading_frequency")
+                    self._reject_early(slug, date_str, "trading_frequency", reason, ctx, offer_sales.offer_sales,
+                                       limit_info=(need_os, "min", "offer sales in 14 days"), keep_shortlisted=True)
                     return None
 
         # -------------------------------------------------------------

@@ -74,6 +74,9 @@ def render_info_md(
     sales_table_md = "\n".join(sales_table_rows)
     fs = sales_metrics.floor_sales
     floor_sales_str = fs.breakdown() if fs is not None else "Not measured (floor unknown)"
+    os_ = getattr(sales_metrics, "offer_sales", None)
+    offer_sales_str = (f"{os_.offer_sales} in {os_.days} days ({os_.confirmed} confirmed by OpenSea's order, "
+                       f"{os_.by_price} priced below the floor)" if os_ is not None else "Not measured")
 
     # Floor metrics
     curr_floor_str = f"{floor_metrics.current_floor:.4f} {floor_metrics.floor_currency}" if floor_metrics.current_floor is not None else "UNKNOWN"
@@ -173,6 +176,7 @@ def render_info_md(
 - **Maximum Transactions in One Day**: {sales_metrics.max_daily_transactions}
 - **Minimum Transactions in One Day**: {sales_metrics.min_daily_transactions}
 - **Bought at Floor Price**: {floor_sales_str}
+- **Sold to a Collection Offer**: {offer_sales_str}
 
 ### Daily Sales Breakdown ({tz_name} Midnight-to-Midnight):
 

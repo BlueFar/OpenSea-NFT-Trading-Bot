@@ -263,7 +263,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             "offline_since": _telemetry_value(telemetry, "offline_since"),
             "checked_today": store.count_results_on(self._today()),
             "shortlisted": store.count_shortlisted(),
-            "candidates_7d": len(store.get_results_since(since7, passes_only=True)),
+            "candidates_7d": self._still_passing(store.get_results_since(since7, passes_only=True)),
             "universe": summary.get("total_monitored_collections", 0),
             "skipped_unverified": store.count_skipped_unverified(verification.required_status)
             if cfg.discovery.skip_unverified and verification.enabled else 0,
@@ -311,6 +311,16 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         collections = self.state_store.get_all_monitored_collections(search=search, limit=limit)
         self._send_json({"collections": collections, "count": len(collections)})
 
+    def _still_passing(self, passes) -> int:
+        """Collections that passed in the period and haven't failed a later check."""
+        newest: Dict[str, str] = {}
+        for r in passes:
+            if r["created_at"] and r["created_at"] > newest.get(r["slug"], ""):
+                newest[r["slug"]] = r["created_at"]
+        latest = self.state_store.get_latest_results(newest)
+        return sum(1 for slug, found in newest.items()
+                   if not (latest.get(slug, {}).get("pass") is False and (latest[slug].get("at") or "") > found))
+
     def _handle_get_candidates(self, query):
         """Candidates from the bot's records (with details) plus Info.md folders found on disk."""
         days = max(1, min(90, int(query.get("days", [7])[0])))
@@ -338,6 +348,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
 
         self._send_json({
             "items": items,
+            "latest": self.state_store.get_latest_results(i["slug"] for i in items),
             "candidates": candidates,
             "count": len(candidates),
             "history": self.state_store.get_all_candidates_history(limit=50),
@@ -492,7 +503,9 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         tf = cfg.filters.trading_frequency
         rules["trading_frequency"].update({"min_sales_7d": tf.min_sales_7d, "min_floor_sales_7d": tf.min_floor_sales_7d,
                                            "floor_sale_min_pct": tf.floor_sale_min_pct,
-                                           "floor_sale_max_pct": tf.floor_sale_max_pct})
+                                           "floor_sale_max_pct": tf.floor_sale_max_pct,
+                                           "min_offer_sales_14d": tf.min_offer_sales_14d,
+                                           "rare_item_pct": tf.rare_item_pct})
         tm = cfg.trade_model
         enabled = set(cfg.discovery.chains)
         chains = []
@@ -551,9 +564,15 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             if field and rule.get("value") is not None:
                 entry[field] = self._number(rule["value"], key)
             if key == "trading_frequency":
-                for name, label in (("min_sales_7d", "sales in 7 days"), ("min_floor_sales_7d", "sales at floor price")):
+                for name, label in (("min_sales_7d", "sales in 7 days"), ("min_floor_sales_7d", "sales at floor price"),
+                                    ("min_offer_sales_14d", "offer sales in 14 days")):
                     if rule.get(name) is not None:
                         entry[name] = int(self._number(rule[name], label))
+                if rule.get("rare_item_pct") is not None:
+                    pct = self._number(rule["rare_item_pct"], "rarest items")
+                    if pct > 100:
+                        raise ValueError("Rarest items must be between 0 and 100%")
+                    entry["rare_item_pct"] = pct
             filters[key] = entry
         if filters:
             out["filters"] = filters

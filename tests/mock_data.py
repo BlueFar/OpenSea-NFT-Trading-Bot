@@ -1,5 +1,5 @@
 from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from src.models.collection import (
     CollectionMetadata,
     Contract,
@@ -51,10 +51,12 @@ def make_sample_sales_events(
     daily_sales: List[int],
     tz_name: str = "Asia/Kolkata",
     price: float = 1.2,
+    offer_price: Optional[float] = None,
 ) -> List[SaleEvent]:
     """
     Generates sale events for the last 7 complete calendar days.
     daily_sales: list of 7 ints representing sales count per day (oldest to newest).
+    offer_price: if set, the oldest sale is priced like an accepted collection offer (well under the floor).
     """
     from src.utils.time import get_seven_complete_calendar_days, get_calendar_day_utc_bounds
 
@@ -76,7 +78,7 @@ def make_sample_sales_events(
                 quantity=1,
                 seller="0xseller",
                 buyer="0xbuyer",
-                price_value=price,
+                price_value=offer_price if (offer_price is not None and not events) else price,
                 price_currency="ETH",
             ))
     return events

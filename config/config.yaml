@@ -32,6 +32,8 @@ filters:
     min_floor_sales_7d: 1            # ...and at least this many bought at about the floor price (0 = off)
     floor_sale_min_pct: 90.0         # Floor-price sale = paid 90-115% of the floor at the time of the sale.
     floor_sale_max_pct: 115.0        # Lower is usually an accepted offer, higher usually a rare item.
+    rare_item_pct: 10.0              # A floor-price sale of an item in the rarest 10% doesn't count (0 = off)
+    min_offer_sales_14d: 1           # ...and at least this many sales to a collection offer in 14 days (0 = off)
     sale_count_mode: "transactions" # Options: transactions (default), item_quantity
   floor_change_1d:
     enabled: true
@@ -84,8 +86,9 @@ floor_history:
 scheduler:
   discovery_interval_seconds: 3600  # Progressive catalog crawl cadence
   candidate_refresh_interval_seconds: 300 # Market data evaluation / refresh cadence
-  evaluations_per_cycle: 10         # Collections evaluated per refresh cycle
-  shortlist_refresh_seconds: 3600   # Collections passing age/verified/listings/frequency are re-checked this often
+  evaluations_per_cycle: 40         # Collections evaluated per refresh cycle
+  shortlist_refresh_seconds: 10800  # Collections passing age/verified/listings/frequency are re-checked this often (3h is
+                                    # enough for the 1-day and 7-day floor references and the floor at each sale)
   request_delay_seconds: 0.5        # Polite spacing between API calls
   rate_limit_backoff_factor: 2.0
   max_retries: 5

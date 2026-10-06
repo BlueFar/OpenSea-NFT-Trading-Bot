@@ -9,6 +9,8 @@ from .parser import (
     parse_sale_events,
     parse_listings,
     parse_offers,
+    parse_order_info,
+    parse_nft_rarity_rank,
 )
 from ...models.collection import (
     CollectionMetadata,
@@ -120,6 +122,7 @@ class OpenSeaProvider(CollectionDataProvider):
         stop_above: Optional[float] = None,
         count_before_ts: Optional[int] = None,
         count_mode: str = "transactions",
+        before_timestamp: Optional[int] = None,
     ) -> Optional[List[SaleEvent]]:
         """
         Fetches sale events occurring after the given timestamp.
@@ -140,6 +143,8 @@ class OpenSeaProvider(CollectionDataProvider):
                 "after": after_timestamp,
                 "limit": 100,
             }
+            if before_timestamp is not None:
+                params["before"] = before_timestamp
             if next_cursor:
                 if next_cursor in seen_cursors:
                     logger.warning("Repeated cursor detected for %s sales events. Halting pagination.", slug)
@@ -175,6 +180,18 @@ class OpenSeaProvider(CollectionDataProvider):
                 break
 
         return all_events
+
+    def get_order_info(self, chain: str, protocol_address: str, order_hash: str) -> Optional[Dict[str, Optional[str]]]:
+        """Whether a sale was a listing bought or an offer accepted (None = order not found or not readable)."""
+        data = self.client.get(f"/api/v2/orders/chain/{chain}/protocol/{protocol_address}/{order_hash}")
+        return parse_order_info(data)
+
+    def get_nft_rarity(self, chain: str, contract: str, token_id: str) -> Tuple[bool, Optional[int]]:
+        """(looked up, rarity rank). The rank is None when the collection has no rarity data."""
+        data = self.client.get(f"/api/v2/chain/{chain}/contract/{contract}/nfts/{token_id}")
+        if not data:
+            return False, None
+        return True, parse_nft_rarity_rank(data)
 
     def get_active_listings_count(
         self,

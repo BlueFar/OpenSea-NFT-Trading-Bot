@@ -74,6 +74,8 @@ class SaleEvent:
     buyer: Optional[str] = None
     price_value: Optional[float] = None
     price_currency: Optional[str] = "ETH"
+    protocol_address: Optional[str] = None  # with order_hash, finds the order (listing bought or offer accepted)
+    token_standard: Optional[str] = None    # "erc721" / "erc1155"
 
 @dataclass
 class Listing:

@@ -131,7 +131,7 @@ def test_dashboard_api_inspect():
         mock_provider = MagicMock()
         mock_provider.get_collection.return_value = make_realistic_passing_collection()
         mock_provider.get_active_listings_count.return_value = (250, False)
-        mock_provider.get_sale_events.return_value = make_sample_sales_events([1, 1, 1, 1, 1, 1, 1])
+        mock_provider.get_sale_events.return_value = make_sample_sales_events([1, 1, 1, 1, 1, 1, 1], offer_price=0.5)
         curr_floor, p1, p7 = make_sample_floor_history(1.25, 2.0, 3.0)
         mock_provider.get_collection_stats.return_value = CollectionStats(floor_price=curr_floor)
         mock_provider.get_floor_price_history.side_effect = lambda slug, timeframe="one_day": p1 if timeframe == "one_day" else p7
