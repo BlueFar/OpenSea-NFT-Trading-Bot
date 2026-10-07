@@ -519,7 +519,7 @@ class CollectionEvaluator:
                     return None
 
         # Trading pace, the other side: did any seller accept a collection offer (the bid this strategy
-        # places) in the last 14 days? The week before the 7 days above is downloaded only when needed.
+        # places) in the last 14 days? The week before the 7 days above is downloaded once a day.
         need_os = cfg_tf.min_offer_sales_14d
         if sale_events is not None and current_floor and need_os > 0:
             window = 6 * 3600
@@ -534,33 +534,34 @@ class CollectionEvaluator:
                     count_mode=cfg_tf.sale_count_mode, order_info=lookups[0],
                 )
 
-            offer_sales = offer_sales_in(events14)
+            # Sales from 8-14 days ago don't change, so they are downloaded once a day per collection. They are
+            # always loaded (not only when last week falls short) so the dashboard lists the full 14 days.
             older_failed = False
-            if offer_sales.offer_sales < need_os:
-                # Sales from 8-14 days ago don't change, so they are downloaded once a day per collection
-                cached = self._older_sales.get(slug)
-                if cached and cached[0] == (start14, start_ts):
-                    older = cached[1]
-                else:
-                    older = self.provider.get_sale_events(slug, after_timestamp=start14, before_timestamp=start_ts,
-                                                          max_pages=5)
-                    if isinstance(older, list):
-                        if len(self._older_sales) > 5000:
-                            self._older_sales.clear()
-                        self._older_sales[slug] = ((start14, start_ts), older)
-                if not isinstance(older, list):
-                    older_failed = True
-                else:
-                    events14 = older + events14
-                    offer_sales = offer_sales_in(events14)
+            cached = self._older_sales.get(slug)
+            if cached and cached[0] == (start14, start_ts):
+                older = cached[1]
+            else:
+                older = self.provider.get_sale_events(slug, after_timestamp=start14, before_timestamp=start_ts,
+                                                      max_pages=5)
+                if isinstance(older, list):
+                    if len(self._older_sales) > 5000:
+                        self._older_sales.clear()
+                    self._older_sales[slug] = ((start14, start_ts), older)
+            if isinstance(older, list):
+                events14 = older + events14
+            else:
+                older_failed = True
+            offer_sales = offer_sales_in(events14)
+            if older_failed:
+                offer_sales.covered_days = 7
             sales_metrics.offer_sales = offer_sales
             ctx["offer_sales"] = offer_sales.summary(need_os)
             fs7 = sales_metrics.floor_sales
-            if fs7 is not None and offer_sales.counted_ids:
-                # Last week's sales the offer check counted show as accepted offers in "What buyers paid" too
+            if fs7 is not None and offer_sales.offer_ids:
+                # Last week's sales OpenSea's order shows as an accepted offer (any kind) read so in "What buyers paid"
                 for row in fs7.rows:
                     if (row.event is not None and row.label == "below"
-                            and offer_sales.counted_ids.get(row.event.event_id) == "confirmed"):
+                            and row.event.event_id in offer_sales.offer_ids):
                         row.how = "offer"
                 ctx["floor_sales"] = fs7.summary(cfg_tf.min_floor_sales_7d)
             if offer_sales.offer_sales < need_os:

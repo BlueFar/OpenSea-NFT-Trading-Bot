@@ -77,9 +77,16 @@ def render_info_md(
     os_ = getattr(sales_metrics, "offer_sales", None)
     offer_sales_str = (f"{os_.offer_sales} in {os_.days} days ({os_.confirmed} confirmed by OpenSea's order, "
                        f"{os_.by_price} priced below the floor)" if os_ is not None else "Not measured")
-    for r in (getattr(os_, "rows", None) or [])[:20]:
+    shown = os_.shown_rows() if os_ is not None else []
+    if os_ is not None and (os_.covered_days or os_.days) < os_.days:
+        offer_sales_str += f" (sales from 8-{os_.days} days ago couldn't be downloaded; list covers {os_.covered_days} days)"
+    if os_ is not None and len(os_.rows) > len(shown):
+        offer_sales_str += f"\n  - Showing {len(shown)} of {len(os_.rows)} sales, counted ones first:"
+    for r in shown:
         day = datetime.fromtimestamp(r["ts"], timezone.utc).strftime("%Y-%m-%d") if r.get("ts") else "?"
         paid = f"{r['price']:.4g} {r.get('currency') or ''}".strip() if r.get("price") is not None else "?"
+        if (r.get("qty") or 1) > 1:
+            paid += f" x{r['qty']}"
         pct = f" ({r['pct']:.0f}% of floor)" if r.get("pct") is not None else ""
         how = {"confirmed": "collection offer, confirmed by OpenSea",
                "price": "judged by price (no order record)"}.get(r.get("how"), f"{r.get('offer_type') or 'item'} offer, not counted")

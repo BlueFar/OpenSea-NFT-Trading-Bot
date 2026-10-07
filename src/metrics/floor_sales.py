@@ -247,11 +247,22 @@ class OfferSalesMetrics:
     days: int = 14
     rows: List[Dict] = field(default_factory=list)       # each accepted offer, newest first (counted or not)
     counted_ids: Dict[str, str] = field(default_factory=dict)  # event id -> "confirmed" / "price" for counted sales
+    offer_ids: Dict[str, str] = field(default_factory=dict)    # event id -> how, for every accepted offer incl. "other"
+    covered_days: Optional[int] = None  # days the sales list really covers (7 when the older week wasn't downloaded)
 
     def summary(self, needed: int) -> Dict:
         return {"count": self.offer_sales, "needed": needed, "confirmed": self.confirmed, "by_price": self.by_price,
                 "other_offers": self.other_offers, "total": self.total, "days": self.days,
-                "rows": self.rows[:MAX_ROWS]}
+                "covered_days": self.covered_days or self.days,
+                "rows": self.shown_rows(), "row_count": len(self.rows)}
+
+    def shown_rows(self) -> List[Dict]:
+        """Up to MAX_ROWS rows, newest first. Counted sales come first, so trait/one-item offers never push them out."""
+        if len(self.rows) <= MAX_ROWS:
+            return list(self.rows)
+        counted = [r for r in self.rows if r["how"] != "other"][:MAX_ROWS]
+        others = [r for r in self.rows if r["how"] == "other"][:MAX_ROWS - len(counted)]
+        return sorted(counted + others, key=lambda r: r.get("ts") or 0, reverse=True)
 
 
 def item_url(ev: SaleEvent) -> Optional[str]:
@@ -298,6 +309,7 @@ def classify_offer_sales(
         if kind == OFFER_ACCEPTED:
             if offer_type in ("trait", "item"):
                 m.other_offers += 1
+                m.offer_ids[ev.event_id] = "other"
                 m.rows.append(_offer_row(row, ev, "other", offer_type))
                 continue
             m.confirmed += 1
@@ -312,6 +324,8 @@ def classify_offer_sales(
         keys.add(_sale_key(ev))
         items += max(1, ev.quantity or 1)
         m.counted_ids[ev.event_id] = how
+        if how == "confirmed":
+            m.offer_ids[ev.event_id] = how
         m.rows.append(_offer_row(row, ev, how, offer_type))
     m.offer_sales = items if count_mode == "item_quantity" else len(keys)
     return m

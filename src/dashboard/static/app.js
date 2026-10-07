@@ -737,23 +737,29 @@
   function offerSales(d) {
     var os = d.offer_sales;
     if (!os || !isNum(os.count)) return "";
-    var days = int(os.days || 14), rows = os.rows || [];
+    var days = int(os.days || 14), covered = int(os.covered_days || days), rows = Array.isArray(os.rows) ? os.rows : null;
     var head = int(os.count) + (os.count === 1 ? " sale" : " sales") + " counted" + (isNum(os.needed) && os.needed > 0 ? " · needs " + int(os.needed) : "");
-    var body = rows.map(function (r) {
+    var body = (rows || []).map(function (r) {
       var l = r.how === "other" ? (OFFER_LABELS[r.offer_type] || OFFER_LABELS.item) : (OFFER_LABELS[r.how] || OFFER_LABELS.price);
       var url = typeof r.url === "string" && r.url.indexOf("https://opensea.io/") === 0 ? r.url : "";
+      var qty = isNum(r.qty) && r.qty > 1 ? ' <span class="sub">×' + int(r.qty) + "</span>" : "";
       return '<tr' + (r.how === "other" ? ' class="not-counted"' : "") + '><td class="paid-day">' + esc(shortDay(r.ts)) + '</td><td class="paid-amt">' +
-        (isNum(r.price) ? money(r.price, r.currency) : "–") + '</td><td class="paid-pct">' + (isNum(r.pct) ? fmt(r.pct, 0) + "%" : "") + "</td>" +
+        (isNum(r.price) ? money(r.price, r.currency) : "–") + qty + '</td><td class="paid-pct">' + (isNum(r.pct) ? fmt(r.pct, 0) + "%" : "") + "</td>" +
         '<td><span class="pill ' + l[0] + '">' + l[1] + "</span></td>" +
         '<td class="paid-link">' + (url ? '<a href="' + esc(url) + '" target="_blank" rel="noopener" aria-label="Open this item on OpenSea">View</a>' : "") + "</td></tr>";
     }).join("");
-    var table = rows.length ? '<table class="tbl paid"><thead><tr><th>Day</th><th>Paid</th><th>Of floor</th><th></th><th></th></tr></thead><tbody>' + body + "</tbody></table>" :
-      '<p class="chart-note" style="margin-top:0">No seller accepted an offer in the last ' + days + " days.</p>";
-    var skipped = os.other_offers ? " " + int(os.other_offers) + (os.other_offers === 1 ? " offer was" : " offers were") +
-      " on a trait or one item, so " + (os.other_offers === 1 ? "it doesn't" : "they don't") + " count." : "";
-    return '<div class="card panel"><div class="section-title"><h2>Sales to offers, last ' + days + " days</h2><span>" + esc(head) + "</span></div>" + table +
+    var table;
+    if (!rows) table = '<p class="chart-note" style="margin-top:0">The list of sales wasn\'t saved for this check. It appears after the next check.</p>';
+    else if (rows.length) table = '<table class="tbl paid"><thead><tr><th>Day</th><th>Paid</th><th>Of floor</th><th></th><th></th></tr></thead><tbody>' + body + "</tbody></table>";
+    else table = '<p class="chart-note" style="margin-top:0">No seller accepted an offer in the last ' + covered + " days.</p>";
+    var notes = [];
+    if (rows && isNum(os.row_count) && os.row_count > rows.length) notes.push("Showing " + rows.length + " of " + int(os.row_count) + " sales, counted ones first.");
+    if (covered < days) notes.push("Sales from " + (covered + 1) + "-" + days + " days ago couldn't be downloaded this time, so only the last " + covered + " days are listed.");
+    if (os.other_offers) notes.push(int(os.other_offers) + (os.other_offers === 1 ? " offer was" : " offers were") +
+      " on a trait or one item, so " + (os.other_offers === 1 ? "it doesn't" : "they don't") + " count.");
+    return '<div class="card panel"><div class="section-title"><h2>Sales to offers, last ' + covered + " days</h2><span>" + esc(head) + "</span></div>" + table +
       '<p class="chart-note">A seller accepted a collection offer, the kind of bid you place. "Judged by price" means OpenSea had no record of the order, ' +
-      "but it sold well under the floor, which only an offer does." + skipped + " View opens the item on OpenSea.</p></div>";
+      "but it sold well under the floor, which only an offer does. ×N means one sale of several items. " + notes.join(" ") + " View opens the item on OpenSea.</p></div>";
   }
 
   function drawerBody(d, extra, skipRules) {

@@ -165,7 +165,9 @@ def test_an_offer_sale_last_week_or_the_week_before_passes():
         report = ev.evaluate_collection("solitary-voyagers", dry_run=True, stop_on_first_failure=True)
         assert report is not None and report.is_overall_pass
         assert ev.last_details["offer_sales"]["count"] == 1
-        assert ev.provider.get_sale_events.call_count == 1   # enough in the last 7 days: no extra download
+        # The week before is still downloaded, so the dashboard lists all 14 days
+        assert ev.provider.get_sale_events.call_count == 2
+        assert ev.last_details["offer_sales"]["covered_days"] == 14
 
     with tempfile.TemporaryDirectory() as d:
         ev, store = _evaluator(d)
@@ -366,3 +368,34 @@ def test_a_confirmed_offer_shows_as_accepted_offer_in_last_weeks_table():
         assert (offer_row["label"], offer_row["how"]) == ("below", "offer")
         assert det["offer_sales"]["rows"][0]["how"] == "confirmed"
         assert det["offer_sales"]["rows"][0]["url"].startswith("https://opensea.io/item/ethereum/")
+
+
+def test_offer_list_keeps_counted_sales_first_and_says_how_many_are_left_out():
+    from src.metrics.floor_sales import MAX_ROWS
+    n_other = MAX_ROWS + 5
+    events = [sale(i, 0.6) for i in range(n_other + 3)]
+    # The 3 oldest are collection offers, the newer ones trait offers
+    info = lambda e: {"kind": "offer", "offer_type": "collection" if int(e.event_id[1:]) < 3 else "trait"}
+    m = offers(events, info)
+    s = m.summary(1)
+    assert s["row_count"] == n_other + 3 and len(s["rows"]) == MAX_ROWS
+    assert sum(r["how"] == "confirmed" for r in s["rows"]) == 3
+    assert [r["ts"] for r in s["rows"]] == sorted((r["ts"] for r in s["rows"]), reverse=True)
+    assert set(m.offer_ids.values()) == {"confirmed", "other"}
+
+
+def test_trait_offer_below_floor_reads_as_accepted_offer_and_failed_older_week_is_flagged():
+    with tempfile.TemporaryDirectory() as d:
+        ev, store = _evaluator(d)
+        week = make_sample_sales_events([1, 1, 1, 1, 1, 1, 1], price=1.2, offer_price=0.7)
+        for e in week:
+            e.protocol_address = "0xseaport"
+        ev.provider.get_sale_events.side_effect = lambda slug, after_timestamp, before_timestamp=None, **kw: (
+            None if before_timestamp else week)
+        ev.provider.get_order_info.side_effect = lambda chain, proto, h: (
+            {"kind": "offer", "offer_type": "trait"} if h == week[0].order_hash else {"kind": "listing", "offer_type": None})
+        ev.evaluate_collection("solitary-voyagers", dry_run=True, stop_on_first_failure=False)
+        det = ev.last_details
+        row = next(r for r in det["floor_sales"]["rows"] if r["ts"] == week[0].event_timestamp)
+        assert (row["label"], row["how"]) == ("below", "offer")
+        assert det["offer_sales"]["covered_days"] == 7 and det["offer_sales"]["days"] == 14
