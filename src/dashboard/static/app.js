@@ -724,16 +724,36 @@
     }).join("");
     var all = fs.sale_rows || fs.total;
     var more = all > fs.rows.length ? '<p class="chart-note">Showing the latest ' + fs.rows.length + " of " + all + " sales.</p>" : "";
-    var os = d.offer_sales;
-    if (os && isNum(os.count)) {
-      more += '<p class="chart-note"><strong>' + int(os.count) + (os.count === 1 ? " sale" : " sales") + " to a collection offer</strong> in the last " + int(os.days || 14) +
-        " days" + (isNum(os.needed) && os.needed > 0 ? " (needs " + int(os.needed) + ")" : "") + ".</p>";
-    }
     return '<div class="card panel"><div class="section-title"><h2>What buyers paid</h2><span>' + esc(head) + "</span></div>" +
       '<table class="tbl paid"><thead><tr><th>Day</th><th>Paid</th><th>Of floor</th><th></th></tr></thead><tbody>' + rows + "</tbody></table>" + more +
       '<p class="chart-note">A floor-price sale is a listing bought at ' + band + " of the floor at the time" +
       (fs.rare_pct > 0 ? ", and not one of the rarest " + fmt(fs.rare_pct, 0) + "% of items" : "") +
       ". Accepted offers don't count, because they say nothing about whether your listing near the floor will sell.</p></div>";
+  }
+
+  // The sales where a seller accepted an offer in the last 14 days: which ones counted, and why
+  var OFFER_LABELS = { confirmed: ["good", "Collection offer"], price: ["neutral", "Judged by price"],
+                       trait: ["neutral", "Trait offer"], item: ["neutral", "One-item offer"] };
+  function offerSales(d) {
+    var os = d.offer_sales;
+    if (!os || !isNum(os.count)) return "";
+    var days = int(os.days || 14), rows = os.rows || [];
+    var head = int(os.count) + (os.count === 1 ? " sale" : " sales") + " counted" + (isNum(os.needed) && os.needed > 0 ? " · needs " + int(os.needed) : "");
+    var body = rows.map(function (r) {
+      var l = r.how === "other" ? (OFFER_LABELS[r.offer_type] || OFFER_LABELS.item) : (OFFER_LABELS[r.how] || OFFER_LABELS.price);
+      var url = typeof r.url === "string" && r.url.indexOf("https://opensea.io/") === 0 ? r.url : "";
+      return '<tr' + (r.how === "other" ? ' class="not-counted"' : "") + '><td class="paid-day">' + esc(shortDay(r.ts)) + '</td><td class="paid-amt">' +
+        (isNum(r.price) ? money(r.price, r.currency) : "–") + '</td><td class="paid-pct">' + (isNum(r.pct) ? fmt(r.pct, 0) + "%" : "") + "</td>" +
+        '<td><span class="pill ' + l[0] + '">' + l[1] + "</span></td>" +
+        '<td class="paid-link">' + (url ? '<a href="' + esc(url) + '" target="_blank" rel="noopener" aria-label="Open this item on OpenSea">View</a>' : "") + "</td></tr>";
+    }).join("");
+    var table = rows.length ? '<table class="tbl paid"><thead><tr><th>Day</th><th>Paid</th><th>Of floor</th><th></th><th></th></tr></thead><tbody>' + body + "</tbody></table>" :
+      '<p class="chart-note" style="margin-top:0">No seller accepted an offer in the last ' + days + " days.</p>";
+    var skipped = os.other_offers ? " " + int(os.other_offers) + (os.other_offers === 1 ? " offer was" : " offers were") +
+      " on a trait or one item, so " + (os.other_offers === 1 ? "it doesn't" : "they don't") + " count." : "";
+    return '<div class="card panel"><div class="section-title"><h2>Sales to offers, last ' + days + " days</h2><span>" + esc(head) + "</span></div>" + table +
+      '<p class="chart-note">A seller accepted a collection offer, the kind of bid you place. "Judged by price" means OpenSea had no record of the order, ' +
+      "but it sold well under the floor, which only an offer does." + skipped + " View opens the item on OpenSea.</p></div>";
   }
 
   function drawerBody(d, extra, skipRules) {
@@ -763,7 +783,7 @@
           return '<div><span class="num" style="color:var(--fg);font-weight:600">' + x[1] + '</span><i class="' + (x[1] ? "" : "zero") + '" style="height:' + (x[1] / max * 46 + 2).toFixed(0) + 'px"></i>' + esc(lbl) + "</div>";
         }).join("") + "</div></div>";
     }
-    html += buyersPaid(d);
+    html += buyersPaid(d) + offerSales(d);
     if (!skipRules) html += '<div class="card" style="overflow:hidden"><div class="section-title" style="padding:16px 20px 0;margin:0"><h2>Rules</h2></div>' + checklistFromDetails(d) + "</div>";
     if ((d.data_notes || []).length) html += '<div class="card panel"><div class="section-title"><h2>Data notes</h2></div><ul class="notes">' + d.data_notes.map(function (n) { return "<li>" + esc(n) + "</li>"; }).join("") + "</ul></div>";
     return html + (extra || "");

@@ -1,7 +1,7 @@
 import os
 import re
 from typing import Dict, Any, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from ..models.collection import CollectionMetadata
 from ..models.metrics import SalesMetrics, FloorPriceMetrics, ListingMetrics
 from ..models.trade import TradeEconomics
@@ -77,6 +77,14 @@ def render_info_md(
     os_ = getattr(sales_metrics, "offer_sales", None)
     offer_sales_str = (f"{os_.offer_sales} in {os_.days} days ({os_.confirmed} confirmed by OpenSea's order, "
                        f"{os_.by_price} priced below the floor)" if os_ is not None else "Not measured")
+    for r in (getattr(os_, "rows", None) or [])[:20]:
+        day = datetime.fromtimestamp(r["ts"], timezone.utc).strftime("%Y-%m-%d") if r.get("ts") else "?"
+        paid = f"{r['price']:.4g} {r.get('currency') or ''}".strip() if r.get("price") is not None else "?"
+        pct = f" ({r['pct']:.0f}% of floor)" if r.get("pct") is not None else ""
+        how = {"confirmed": "collection offer, confirmed by OpenSea",
+               "price": "judged by price (no order record)"}.get(r.get("how"), f"{r.get('offer_type') or 'item'} offer, not counted")
+        link = f" {r['url']}" if r.get("url") else ""
+        offer_sales_str += f"\n  - {day} (UTC): {paid}{pct}, {how}.{link}"
 
     # Floor metrics
     curr_floor_str = f"{floor_metrics.current_floor:.4f} {floor_metrics.floor_currency}" if floor_metrics.current_floor is not None else "UNKNOWN"

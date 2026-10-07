@@ -245,10 +245,20 @@ class OfferSalesMetrics:
     other_offers: int = 0  # accepted offers on a trait or one item: not the bid this strategy places
     total: int = 0         # sales in the window
     days: int = 14
+    rows: List[Dict] = field(default_factory=list)       # each accepted offer, newest first (counted or not)
+    counted_ids: Dict[str, str] = field(default_factory=dict)  # event id -> "confirmed" / "price" for counted sales
 
     def summary(self, needed: int) -> Dict:
         return {"count": self.offer_sales, "needed": needed, "confirmed": self.confirmed, "by_price": self.by_price,
-                "other_offers": self.other_offers, "total": self.total, "days": self.days}
+                "other_offers": self.other_offers, "total": self.total, "days": self.days,
+                "rows": self.rows[:MAX_ROWS]}
+
+
+def item_url(ev: SaleEvent) -> Optional[str]:
+    """The item's page on OpenSea, so the owner can check a sale himself."""
+    if ev.chain and ev.contract_address and ev.token_id is not None:
+        return f"https://opensea.io/item/{ev.chain}/{ev.contract_address}/{ev.token_id}"
+    return None
 
 
 def classify_offer_sales(
@@ -284,21 +294,35 @@ def classify_offer_sales(
             continue
         info = order_info(ev) if order_info else None
         kind = (info or {}).get("kind")
+        offer_type = (info or {}).get("offer_type")
         if kind == OFFER_ACCEPTED:
-            if (info or {}).get("offer_type") in ("trait", "item"):
+            if offer_type in ("trait", "item"):
                 m.other_offers += 1
+                m.rows.append(_offer_row(row, ev, "other", offer_type))
                 continue
             m.confirmed += 1
+            how = "confirmed"
         elif kind is None and row.label == BELOW and (row.ref_source != "now" or (row.pct or 100) < 75):
             # Compared with today's floor (no saved floor from then), a listing bought at the old floor can look
             # "below" after the floor rose, so only a price far under today's floor counts without the order.
             m.by_price += 1
+            how = "price"
         else:
             continue
         keys.add(_sale_key(ev))
         items += max(1, ev.quantity or 1)
+        m.counted_ids[ev.event_id] = how
+        m.rows.append(_offer_row(row, ev, how, offer_type))
     m.offer_sales = items if count_mode == "item_quantity" else len(keys)
     return m
+
+
+def _offer_row(row: SaleRow, ev: SaleEvent, how: str, offer_type: Optional[str]) -> Dict:
+    """how: "confirmed" (OpenSea's order says a collection offer), "price" (counted by price), "other" (trait/item offer)."""
+    return {"ts": row.ts, "price": row.price, "currency": row.currency,
+            "pct": None if row.pct is None else round(row.pct, 1), "ref_floor": row.ref_floor,
+            "ref_source": row.ref_source, "how": how, "offer_type": offer_type, "url": item_url(ev),
+            "qty": max(1, ev.quantity or 1)}
 
 
 def too_few_offer_sales_reason(os_: OfferSalesMetrics, needed: int) -> str:

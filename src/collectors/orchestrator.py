@@ -555,6 +555,14 @@ class CollectionEvaluator:
                     offer_sales = offer_sales_in(events14)
             sales_metrics.offer_sales = offer_sales
             ctx["offer_sales"] = offer_sales.summary(need_os)
+            fs7 = sales_metrics.floor_sales
+            if fs7 is not None and offer_sales.counted_ids:
+                # Last week's sales the offer check counted show as accepted offers in "What buyers paid" too
+                for row in fs7.rows:
+                    if (row.event is not None and row.label == "below"
+                            and offer_sales.counted_ids.get(row.event.event_id) == "confirmed"):
+                        row.how = "offer"
+                ctx["floor_sales"] = fs7.summary(cfg_tf.min_floor_sales_7d)
             if offer_sales.offer_sales < need_os:
                 reason = ("sale events API failed (8-14 days ago)" if older_failed
                           else too_few_offer_sales_reason(offer_sales, need_os))

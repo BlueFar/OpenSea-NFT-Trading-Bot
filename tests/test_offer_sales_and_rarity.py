@@ -334,3 +334,35 @@ def test_failed_older_download_is_not_a_near_miss_and_rarity_misses_wait_a_day()
         assert calls > 0
         ev.evaluate_collection("solitary-voyagers", dry_run=True, stop_on_first_failure=True)
         assert ev.provider.get_nft_rarity.call_count == calls   # the miss is remembered
+
+
+def test_offer_sales_list_each_sale_with_how_it_was_judged_and_a_link():
+    events = [sale(0, 0.6), sale(1, 0.62), sale(2, 0.65), sale(3, 0.98)]
+    info = {"0xo0": {"kind": "offer", "offer_type": "collection"},
+            "0xo1": {"kind": "offer", "offer_type": "trait"},
+            "0xo3": {"kind": "listing"}}                       # 0xo2: no order record, judged by price
+    m = offers(events, lambda e: info.get(e.order_hash))
+    rows = m.summary(1)["rows"]
+    assert [r["how"] for r in sorted(rows, key=lambda r: r["ts"])] == ["confirmed", "other", "price"]
+    first = next(r for r in rows if r["how"] == "confirmed")
+    assert first["url"] == "https://opensea.io/item/ethereum/0xC/0" and first["pct"] == 60.0
+    assert next(r for r in rows if r["how"] == "other")["offer_type"] == "trait"
+    assert m.counted_ids == {"e0": "confirmed", "e2": "price"}
+
+
+def test_a_confirmed_offer_shows_as_accepted_offer_in_last_weeks_table():
+    with tempfile.TemporaryDirectory() as d:
+        ev, store = _evaluator(d)
+        week = make_sample_sales_events([1, 1, 1, 1, 1, 1, 1], price=1.2, offer_price=0.7)
+        for e in week:
+            e.protocol_address = "0xseaport"
+        ev.provider.get_sale_events.return_value = week
+        ev.provider.get_order_info.side_effect = lambda chain, proto, h: (
+            {"kind": "offer", "offer_type": "collection"} if h == week[0].order_hash else {"kind": "listing", "offer_type": None})
+        report = ev.evaluate_collection("solitary-voyagers", dry_run=True, stop_on_first_failure=True)
+        assert report is not None and report.is_overall_pass
+        det = ev.last_details
+        offer_row = next(r for r in det["floor_sales"]["rows"] if r["ts"] == week[0].event_timestamp)
+        assert (offer_row["label"], offer_row["how"]) == ("below", "offer")
+        assert det["offer_sales"]["rows"][0]["how"] == "confirmed"
+        assert det["offer_sales"]["rows"][0]["url"].startswith("https://opensea.io/item/ethereum/")
