@@ -9,7 +9,8 @@ class ObservedMarketData:
     floor_currency: str = "ETH"
     marketplace_fee_pct: Optional[float] = None  # OpenSea fee percentage from API
     creator_royalty_pct: Optional[float] = None  # Creator fee percentage from API
-    fees_reliable: bool = False                  # True only if fees were reliably extracted from API
+    fees_reliable: bool = False                  # True if the marketplace fee came from the API or config
+    marketplace_fee_source: str = "UNKNOWN"      # "API", "CONFIG" or "UNKNOWN"
 
 @dataclass
 class TradeAssumptions:
@@ -30,6 +31,8 @@ class ModelledResults:
     estimated_profit_margin_pct: Optional[float] = None
     entry_offer_to_floor_ratio_pct: Optional[float] = None
     floor_spread_to_entry_offer_pct: Optional[float] = None
+    effective_entry_cost: Optional[float] = None  # Modelled entry offer + creator royalty owed on the exit sale
+    floor_premium_over_effective_offer_pct: Optional[float] = None  # (floor - effective_entry_cost) / effective_entry_cost * 100
     is_complete_and_reliable: bool = False
     status_note: str = ""
 

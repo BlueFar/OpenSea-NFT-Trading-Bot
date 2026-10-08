@@ -7,3 +7,8 @@ state/*.db
 state/*.pid
 *.log
 .pytest_cache/
+state/*.db-wal
+state/*.db-shm
+state/desired_state.json
+logs/
+config/overrides.yaml

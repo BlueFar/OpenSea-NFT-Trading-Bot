@@ -1,5 +1,6 @@
 import time
 import random
+import threading
 import requests
 from typing import Optional, Dict, Any
 from ...utils.logging import setup_logger
@@ -16,6 +17,13 @@ class OpenSeaAuthError(OpenSeaApiError):
 
 class OpenSeaRateLimitError(OpenSeaApiError):
     """Raised when rate limit retries are exhausted."""
+    pass
+
+class OpenSeaNetworkError(OpenSeaApiError):
+    """
+    Raised when OpenSea could not be reached at all (no internet, DNS or timeouts on every retry).
+    Callers must not treat this as missing data: the bot pauses instead of rejecting collections.
+    """
     pass
 
 class OpenSeaClient:
@@ -45,8 +53,23 @@ class OpenSeaClient:
         if self.api_key:
             self.session.headers.update({"x-api-key": self.api_key})
 
+        # Set when the bot is asked to stop, so waits between retries end at once
+        self.stop_event = threading.Event()
+
         self.last_rate_limit_remaining: Optional[int] = None
         self.last_rate_limit_reset: Optional[int] = None
+
+    def set_api_key(self, api_key: Optional[str]) -> None:
+        """Switches to a new key (e.g. after it was changed in .env) without a restart."""
+        self.api_key = api_key
+        if api_key:
+            self.session.headers["x-api-key"] = api_key
+        else:
+            self.session.headers.pop("x-api-key", None)
+
+    def _sleep(self, seconds: float) -> None:
+        if self.stop_event.wait(seconds):
+            raise OpenSeaNetworkError("Stopping: request cancelled")
 
     def close(self):
         """Closes the underlying HTTP session."""
@@ -82,9 +105,12 @@ class OpenSeaClient:
 
         # Polite inter-request spacing
         if self.request_delay > 0:
-            time.sleep(self.request_delay)
+            self._sleep(self.request_delay)
 
+        network_failures = 0
         for attempt in range(self.max_retries + 1):
+            if self.stop_event.is_set():
+                raise OpenSeaNetworkError("Stopping: request cancelled")
             try:
                 resp = self.session.request(
                     method=method,
@@ -107,7 +133,7 @@ class OpenSeaClient:
                     retry_after = resp.headers.get("retry-after")
                     wait_time = float(retry_after) if retry_after else (self.backoff_factor ** attempt) + random.uniform(0.5, 1.5)
                     logger.warning("OpenSea 429 Rate Limit hit. Backing off for %.2fs (attempt %d/%d)...", wait_time, attempt + 1, self.max_retries)
-                    time.sleep(wait_time)
+                    self._sleep(wait_time)
                     continue
 
                 if resp.status_code in (401, 403):
@@ -117,22 +143,28 @@ class OpenSeaClient:
                 if resp.status_code >= 500:
                     wait_time = (self.backoff_factor ** attempt) + random.uniform(0.5, 1.5)
                     logger.warning("OpenSea Server Error (%d) on %s. Retrying in %.2fs...", resp.status_code, path, wait_time)
-                    time.sleep(wait_time)
+                    self._sleep(wait_time)
                     continue
 
+                if resp.status_code == 400 and "/orders/" in path:
+                    logger.debug("OpenSea order not found: %s", path)  # common for older or other-market sales
+                    return None
                 logger.warning("OpenSea unexpected HTTP %d: %s", resp.status_code, resp.text[:200])
                 return None
 
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                network_failures += 1
                 wait_time = (self.backoff_factor ** attempt) + random.uniform(0.5, 1.5)
                 logger.warning("Network connection/timeout error (%s). Retrying in %.2fs (attempt %d/%d)...", str(e)[:100], wait_time, attempt + 1, self.max_retries)
-                time.sleep(wait_time)
-            except (OpenSeaAuthError, OpenSeaRateLimitError):
+                self._sleep(wait_time)
+            except (OpenSeaAuthError, OpenSeaRateLimitError, OpenSeaNetworkError):
                 raise
             except Exception as e:
                 logger.error("Unexpected error requesting %s: %s", path, str(e))
                 return None
 
+        if network_failures == self.max_retries + 1:
+            raise OpenSeaNetworkError(f"OpenSea unreachable for {path} after {network_failures} attempts")
         logger.error("Exceeded maximum retries (%d) for %s", self.max_retries, path)
         return None
 

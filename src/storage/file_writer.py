@@ -1,7 +1,7 @@
 import os
 import re
-from typing import Dict, Any, Optional
-from datetime import datetime
+from typing import Dict, Any, List, Optional
+from datetime import datetime, timezone
 from ..models.collection import CollectionMetadata
 from ..models.metrics import SalesMetrics, FloorPriceMetrics, ListingMetrics
 from ..models.trade import TradeEconomics
@@ -31,6 +31,8 @@ def render_info_md(
     detection_dt_local: datetime,
     tz_name: str = "Asia/Kolkata",
     bot_version: str = "1.0.0",
+    num_owners: Optional[int] = None,
+    data_notes: Optional[List[str]] = None,
 ) -> str:
     """
     Renders the human-readable and machine-parseable Info.md markdown handoff file.
@@ -58,6 +60,7 @@ def render_info_md(
     if listing_metrics.is_early_exit_exceeded:
         listed_pct_str = f">{listed_pct_str} (exceeded threshold early)"
     total_supply_str = f"{collection.total_supply:,}" if collection.total_supply is not None else "UNKNOWN"
+    data_notes_md = "\n".join(f"- {n}" for n in (data_notes or [])) or "- None"
     listed_items_str = f"{listing_metrics.listed_items:,}" if listing_metrics.listed_items is not None else "UNKNOWN"
 
     # Daily sales table
@@ -69,6 +72,26 @@ def render_info_md(
         rec = sales_metrics.today_in_progress_record
         sales_table_rows.append(f"| {rec.date_str} | {rec.sales_transactions} | {rec.sales_items} | In-Progress (Today) |")
     sales_table_md = "\n".join(sales_table_rows)
+    fs = sales_metrics.floor_sales
+    floor_sales_str = fs.breakdown() if fs is not None else "Not measured (floor unknown)"
+    os_ = getattr(sales_metrics, "offer_sales", None)
+    offer_sales_str = (f"{os_.offer_sales} in {os_.days} days ({os_.confirmed} confirmed by OpenSea's order, "
+                       f"{os_.by_price} priced below the floor)" if os_ is not None else "Not measured")
+    shown = os_.shown_rows() if os_ is not None else []
+    if os_ is not None and (os_.covered_days or os_.days) < os_.days:
+        offer_sales_str += f" (sales from 8-{os_.days} days ago couldn't be downloaded; list covers {os_.covered_days} days)"
+    if os_ is not None and len(os_.rows) > len(shown):
+        offer_sales_str += f"\n  - Showing {len(shown)} of {len(os_.rows)} sales, counted ones first:"
+    for r in shown:
+        day = datetime.fromtimestamp(r["ts"], timezone.utc).strftime("%Y-%m-%d") if r.get("ts") else "?"
+        paid = f"{r['price']:.4g} {r.get('currency') or ''}".strip() if r.get("price") is not None else "?"
+        if (r.get("qty") or 1) > 1:
+            paid += f" x{r['qty']}"
+        pct = f" ({r['pct']:.0f}% of floor)" if r.get("pct") is not None else ""
+        how = {"confirmed": "collection offer, confirmed by OpenSea",
+               "price": "judged by price (no order record)"}.get(r.get("how"), f"{r.get('offer_type') or 'item'} offer, not counted")
+        link = f" {r['url']}" if r.get("url") else ""
+        offer_sales_str += f"\n  - {day} (UTC): {paid}{pct}, {how}.{link}"
 
     # Floor metrics
     curr_floor_str = f"{floor_metrics.current_floor:.4f} {floor_metrics.floor_currency}" if floor_metrics.current_floor is not None else "UNKNOWN"
@@ -88,6 +111,8 @@ def render_info_md(
     # Ratios
     offer_to_floor_ratio_str = f"{mod.entry_offer_to_floor_ratio_pct:.2f}%" if mod.entry_offer_to_floor_ratio_pct is not None else "UNKNOWN"
     floor_spread_ratio_str = f"{mod.floor_spread_to_entry_offer_pct:.2f}%" if mod.floor_spread_to_entry_offer_pct is not None else "UNKNOWN"
+    effective_cost_str = f"{mod.effective_entry_cost:.4f} {trade_economics.currency}" if mod.effective_entry_cost is not None else "UNKNOWN"
+    floor_premium_str = f"{mod.floor_premium_over_effective_offer_pct:.2f}%" if mod.floor_premium_over_effective_offer_pct is not None else "UNKNOWN"
 
     # Trade Economics modelled values
     modelled_entry_str = f"{mod.modelled_entry_offer:.4f} {trade_economics.currency}" if mod.modelled_entry_offer is not None else "UNKNOWN"
@@ -147,7 +172,7 @@ def render_info_md(
 ## Collection Size
 
 - **Total Supply**: {total_supply_str}
-- **Owners**: {collection.total_supply if collection.total_supply is not None else 'UNKNOWN'}
+- **Owners**: {f'{num_owners:,}' if num_owners is not None else 'UNKNOWN'}
 - **Listed Items**: {listed_items_str}
 - **Listed Percentage**: {listed_pct_str}
 
@@ -165,6 +190,8 @@ def render_info_md(
 - **Average Items Sold / Day**: {sales_metrics.average_sales_items_per_day:.2f}
 - **Maximum Transactions in One Day**: {sales_metrics.max_daily_transactions}
 - **Minimum Transactions in One Day**: {sales_metrics.min_daily_transactions}
+- **Bought at Floor Price**: {floor_sales_str}
+- **Sold to a Collection Offer**: {offer_sales_str}
 
 ### Daily Sales Breakdown ({tz_name} Midnight-to-Midnight):
 
@@ -189,6 +216,8 @@ def render_info_md(
 - **OpenSea Marketplace Fee**: {mp_fee_pct_str}
 - **Modelled Entry Offer / Floor Ratio**: {offer_to_floor_ratio_str}
 - **Floor / Modelled Entry Offer Spread**: {floor_spread_ratio_str}
+- **Effective Entry Cost Including Royalty**: {effective_cost_str}
+- **Floor Premium Over Effective Entry Cost**: {floor_premium_str}
 
 ## Trade Economics
 
@@ -199,12 +228,12 @@ def render_info_md(
 - **Current Floor**: {curr_floor_str}
 - **Marketplace Fee (from OpenSea API)**: {mp_fee_pct_str}
 - **Creator Royalty (from OpenSea API)**: {royalty_pct_str}
-- **Fee Data Reliability**: {'RELIABLE' if obs.fees_reliable else 'INCOMPLETE / UNKNOWN (applicable OpenSea marketplace fee not confirmed)'}
+- **Fee Data Reliability**: {'INCOMPLETE / UNKNOWN (applicable OpenSea marketplace fee not confirmed)' if not obs.fees_reliable else ('CONFIGURED (OpenSea fee not in collection metadata; using trade_model.marketplace_fee_pct)' if obs.marketplace_fee_source == 'CONFIG' else 'RELIABLE (from OpenSea API)')}
 
 ### B. Model Assumptions (Configured Trading Strategy Parameters)
 - **[ASSUMPTION] Entry-Offer Premium**: +{asm.entry_offer_premium_pct:.1f}% above observed top offer
 - **[ASSUMPTION] Target Exit Discount**: -{asm.target_sale_discount_from_floor_pct:.1f}% below current floor
-- **[ASSUMPTION] Gas Estimate**: {asm.gas_estimate_eth:.4f} ETH
+- **[ASSUMPTION] Gas Estimate**: {asm.gas_estimate_eth:.4f} {trade_economics.currency} (per trade, chain-specific)
 
 ### C. Modelled Results (Theoretical Estimates)
 - **Modelled Entry Offer (Hypothetical Buy Price)**: {modelled_entry_str}
@@ -233,7 +262,11 @@ def render_info_md(
 - OpenSea Historical Floor Price API: `GET /api/v2/collections/{collection.slug}/floor_prices`
 - OpenSea Collection Events API: `GET /api/v2/events/collection/{collection.slug}?event_type=sale`
 - OpenSea Collection Listings API: `GET /api/v2/listings/collection/{collection.slug}/all`
-- OpenSea Collection Offers API: `GET /api/v2/offers/collection/{collection.slug}/all`
+- OpenSea Collection Offers API: `GET /api/v2/offers/collection/{collection.slug}`
+
+## Data Notes
+
+{data_notes_md}
 
 ## Notes
 
@@ -256,6 +289,8 @@ def write_candidate_info_md(
     detection_dt_local: datetime,
     tz_name: str = "Asia/Kolkata",
     bot_version: str = "1.0.0",
+    num_owners: Optional[int] = None,
+    data_notes: Optional[List[str]] = None,
 ) -> str:
     """
     Atomically writes Info.md to DATA_ROOT/YYYY-MM-DD/<Sanitized_Project>/Info.md
@@ -281,6 +316,8 @@ def write_candidate_info_md(
         detection_dt_local=detection_dt_local,
         tz_name=tz_name,
         bot_version=bot_version,
+        num_owners=num_owners,
+        data_notes=data_notes,
     )
 
     with open(tmp_path, "w", encoding="utf-8") as f:

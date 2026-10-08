@@ -5,44 +5,98 @@ general:
   log_level: "INFO"
 
 discovery:
-  # Primary source uses GET /api/v2/collections with persistent cursor checkpointing
+  # Primary source uses GET /api/v2/collections with persistent cursor checkpointing (one cursor per chain)
   primary_source: "collections"
   batch_size: 50
-  max_pages_per_cycle: 2            # Progressive crawl: advances N pages per discovery cycle
-  enable_top: true                  # Supplementary source: GET /api/v2/collections/top
-  enable_trending: true             # Supplementary source: GET /api/v2/collections/trending
-  chains: ["ethereum", "base", "polygon"]
+  max_pages_per_cycle: 2            # Progressive crawl: advances N pages per chain per discovery cycle
+  order_by: "seven_day_volume"      # Most-traded first. Options: seven_day_volume, created_date, one_day_change,
+                                    # seven_day_change, num_owners, market_cap. Remove for the unordered catalog.
+  max_depth_pages: 20               # Restart each chain's crawl from the top after N pages (0 = crawl to the end)
+  enable_top: false                 # Supplementary GET /api/v2/collections/top (not a documented v2 endpoint)
+  enable_trending: false            # Supplementary GET /api/v2/collections/trending (not a documented v2 endpoint)
+  # Every OpenSea NFT chain except Solana (see src/config/chains.py). Turn chains on/off in the dashboard.
+  chains: ["ethereum", "base", "polygon", "arbitrum", "optimism", "zora", "blast", "abstract", "robinhood",
+           "shape", "unichain", "soneium", "ink", "megaeth", "ape_chain", "ronin", "avalanche", "sei",
+           "bera_chain", "flow", "gunzilla", "hyperevm", "somnia", "monad", "animechain", "arc", "stablechain"]
+  skip_unverified: true             # Don't evaluate collections whose discovery listing shows no blue tick
   watchlist: []                     # Optional explicit slugs to monitor
 
+# Every rule has "enabled". A switched-off rule is still measured and shown, but never rejects.
+# The dashboard's Settings page saves changes to config/overrides.yaml, which overrides this file.
 filters:
   trading_frequency:
+    enabled: true
     metric: "average_daily_sales"   # Options: average_daily_sales, max_daily_sales, both
     max_threshold: 2.0
+    min_sales_7d: 1                  # At least this many sales in the last 7 days (0 = off)
+    min_floor_sales_7d: 1            # ...and at least this many bought at about the floor price (0 = off)
+    floor_sale_min_pct: 90.0         # Floor-price sale = paid 90-115% of the floor at the time of the sale.
+    floor_sale_max_pct: 115.0        # Lower is usually an accepted offer, higher usually a rare item.
+    rare_item_pct: 10.0              # A floor-price sale of an item in the rarest 10% doesn't count (0 = off)
+    min_offer_sales_14d: 1           # ...and at least this many sales to a collection offer in 14 days (0 = off)
     sale_count_mode: "transactions" # Options: transactions (default), item_quantity
   floor_change_1d:
+    enabled: true
     max_change_pct: 8.0             # Requirement: < 8.0%
   floor_change_7d:
+    enabled: true
     max_change_pct: 10.0            # Requirement: < 10.0%
   offer_to_floor:
-    enabled: false                  # Advisory / observe-only pending trading formula confirmation
-    min_ratio_pct: 40.0
-    formula: "modelled_entry_offer_to_floor" # Options: modelled_entry_offer_to_floor, floor_spread_to_entry_offer
+    enabled: true
+    min_ratio_pct: 40.0             # "Floor above 40% of top offer, including royalty"
+    # floor_premium_over_effective_offer: floor is >= 40% above (entry offer + royalty on resale)
+    # floor_spread_to_entry_offer:        floor is >= 40% above entry offer (no royalty)
+    # modelled_entry_offer_to_floor:      entry offer is >= 40% of floor (original spec reading)
+    formula: "floor_premium_over_effective_offer"
+  net_profit:
+    enabled: true
+    min_net_roi_pct: 10.0           # Modelled net ROI after marketplace fee, royalty and gas
   listed_items:
+    enabled: true
     max_listed_pct: 6.0             # Requirement: < 6.0%
   verification:
+    enabled: true
     required_status: ["verified"]   # Specifically blue checkmark
   project_age:
+    enabled: true
     min_age_days: 60.0              # Requirement: > 60.0 days (OpenSea Collection Age)
 
 trade_model:
-  entry_offer_premium_pct: 1.0      # Model assumption: bid placed 1.0% above observed top offer
+  entry_offer_premium_pct: 1.0      # Model assumption: bid placed 1.0% above observed top collection offer
   target_sale_discount_from_floor_pct: 5.0 # Model assumption: exit discount below floor
-  gas_estimate_eth: 0.005           # Model assumption: gas costs in ETH
-  # No fallback marketplace fee: fee must be determined reliably from API, else marked UNKNOWN
+  gas_estimate_eth: 0.005           # Model assumption: gas per trade on Ethereum, in ETH
+  chain_gas: {}                     # Per-chain gas in that chain's coin, e.g. {base: 0.0002, ape_chain: 0.05}.
+                                    # Chains not listed use the defaults in src/config/chains.py.
+  # Used only when collection metadata does not list the OpenSea fee; labelled CONFIGURED in Info.md.
+  # Set this to OpenSea's current marketplace fee. Remove (null) to mark such collections INCOMPLETE instead.
+  marketplace_fee_pct: 1.0
+
+floor_history:
+  # OpenSea v2 has no documented floor time-series endpoint, so the bot records its own floor snapshots.
+  # 1-day / 7-day checks start passing once snapshots from ~24h / ~7d ago exist.
+  snapshot_retention_days: 10
+  one_day_tolerance_hours: 6.0
+  seven_day_tolerance_hours: 24.0
+  use_provider_endpoint: true       # Also try /collections/{slug}/floor_prices when no snapshot exists
+  # After downtime (e.g. a power cut) there may be no snapshot inside the normal window. Then the nearest
+  # snapshot within these wider windows is used, and Info.md says so under "Data Notes".
+  gap_fallback_1d_hours: 12.0
+  gap_fallback_7d_hours: 48.0
 
 scheduler:
   discovery_interval_seconds: 3600  # Progressive catalog crawl cadence
   candidate_refresh_interval_seconds: 300 # Market data evaluation / refresh cadence
-  request_delay_seconds: 0.5        # Polite spacing between API calls
+  evaluations_per_cycle: 40         # Collections evaluated per refresh cycle
+  shortlist_refresh_seconds: 10800  # Collections passing age/verified/listings/frequency are re-checked this often (3h is
+                                    # enough for the 1-day and 7-day floor references and the floor at each sale)
+  request_delay_seconds: 0.6        # Polite spacing between API calls (max 100 a minute; the key allows 120)
   rate_limit_backoff_factor: 2.0
   max_retries: 5
+
+runtime:
+  wait_for_internet: true           # Pause while offline instead of marking collections as failed
+  connectivity_host: "api.opensea.io"
+  offline_check_seconds: 30
+  notify_new_candidates: true       # macOS notification when a new candidate is found
+  notification_sound: false
+  ipv4_only: true                   # Some home networks have broken IPv6, which stalls every OpenSea call
