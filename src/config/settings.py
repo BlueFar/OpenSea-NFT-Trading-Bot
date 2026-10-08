@@ -121,6 +121,7 @@ class SchedulerConfig(BaseModel):
     max_retries: int = 5
     evaluations_per_cycle: int = 40
     shortlist_refresh_seconds: int = 10800  # Re-check collections that passed the cheap filters this often
+    chain_volume_interval_seconds: int = 21600  # Refresh the "Most active chains" table this often (0 = off)
 
 class RuntimeConfig(BaseModel):
     wait_for_internet: bool = True            # Pause while offline instead of skipping collections

@@ -117,6 +117,14 @@ class StateStore:
                     updated_at TEXT
                 )
             """)
+            # Each chain's top collections and their volume, for the "Most active chains" table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS chain_volume (
+                    chain TEXT PRIMARY KEY,
+                    data TEXT,
+                    updated_at TEXT
+                )
+            """)
             conn.commit()
 
     @staticmethod
@@ -503,6 +511,27 @@ class StateStore:
                 ON CONFLICT(symbol) DO UPDATE SET usd=excluded.usd, updated_at=excluded.updated_at
             """, [(sym, float(usd), now) for sym, usd in prices.items()])
             conn.commit()
+
+    def set_chain_volume(self, chain: str, data: Dict[str, Any]):
+        now = datetime.now(timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO chain_volume (chain, data, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(chain) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at
+            """, (chain, json.dumps(data), now))
+            conn.commit()
+
+    def get_chain_volume(self) -> Dict[str, Dict[str, Any]]:
+        """{chain: {"data", "updated_at"}}"""
+        with self._get_connection() as conn:
+            rows = conn.execute("SELECT chain, data, updated_at FROM chain_volume").fetchall()
+        out = {}
+        for chain, data, at in rows:
+            try:
+                out[chain] = {"data": json.loads(data), "updated_at": at}
+            except (TypeError, ValueError):
+                continue
+        return out
 
     def get_usd_prices(self) -> Dict[str, Dict[str, Any]]:
         with self._get_connection() as conn:

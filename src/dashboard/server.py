@@ -14,6 +14,7 @@ from ..storage.state_store import StateStore
 from ..providers.opensea.client import OpenSeaClient, OpenSeaNetworkError
 from ..providers.opensea.provider import OpenSeaProvider
 from ..collectors.orchestrator import CollectionEvaluator
+from ..collectors.chain_volume import summarize as summarize_chain_volume
 from ..runtime import control, launchd
 from ..runtime.control import BotProcessManager, PID_FILE, LOG_FILE, WORKSPACE_ROOT  # noqa: F401 (re-exported)
 from ..utils.logging import setup_logger
@@ -178,6 +179,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             "/api/settings": lambda: self._handle_get_settings(),
             "/api/logs": lambda: self._handle_get_logs(query),
             "/api/prices": lambda: self._handle_get_prices(),
+            "/api/chains": lambda: self._handle_get_chains(),
         }
         if path in routes:
             routes[path]()
@@ -535,6 +537,22 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         if book is None:
             book = type(self).price_book = PriceBook(self.state_store)
         self._send_json({"prices": book.prices(), "aliases": WRAPPED_TO_NATIVE})
+
+    def _handle_get_chains(self):
+        book = getattr(type(self), "price_book", None)
+        if book is None:
+            book = type(self).price_book = PriceBook(self.state_store)
+        prices = {k: v["usd"] for k, v in book.prices().items() if isinstance(v.get("usd"), (int, float))}
+        enabled = set(self.config.discovery.chains)
+        chains = [{"id": c.id, "name": c.name, "enabled": c.id in enabled} for c in CHAINS]
+        llama = self.state_store.get_telemetry("defillama_nft_volume")
+        try:
+            llama = json.loads(llama) if llama else None
+        except (TypeError, ValueError):
+            llama = None
+        out = summarize_chain_volume(self.state_store.get_chain_volume(), prices, chains, llama)
+        out["interval_hours"] = self.config.scheduler.chain_volume_interval_seconds / 3600.0
+        self._send_json(out)
 
     def _handle_get_settings(self):
         self._send_json(self._settings_payload())

@@ -22,6 +22,8 @@ from .providers.opensea.client import OpenSeaClient
 from .providers.opensea.provider import OpenSeaProvider
 from .discovery.engine import DiscoveryEngine
 from .collectors.orchestrator import CollectionEvaluator
+from .collectors.chain_volume import refresh_chain_volume
+from .config.chains import CHAINS
 from .utils.logging import setup_logger
 from .utils.time import now_local
 from datetime import timedelta
@@ -119,6 +121,13 @@ class NFTBot:
         logger.info("Settings changed. Using the new settings from the next check.")
         self.state_store.log_event("settings", "New settings are in use.")
 
+    def _last_chain_volume_time(self) -> float:
+        """When the chain table was last refreshed, so a restart after a power cut doesn't redo it at once."""
+        try:
+            return float(self.state_store.get_telemetry("last_chain_volume_time") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
     def _due_collections(self):
         verification = self.config.filters.verification
         allowed = None
@@ -174,6 +183,7 @@ class NFTBot:
 
         last_discovery_time = 0.0
         last_evaluation_time = 0.0
+        last_chain_volume_time = self._last_chain_volume_time()
 
         while self._running:
             self._maybe_reload_config()
@@ -229,6 +239,21 @@ class NFTBot:
                 else:
                     logger.info("Candidate refresh cycle: no collections currently in monitored universe.")
                     last_evaluation_time = now
+
+            # 3. How busy each chain is, for the dashboard (after the first evaluation round)
+            every = self.config.scheduler.chain_volume_interval_seconds
+            if every > 0 and last_evaluation_time and time.time() - last_chain_volume_time >= every:
+                logger.info("Refreshing NFT volume per chain...")
+                try:
+                    n = refresh_chain_volume(self.client, self.state_store, [c.id for c in CHAINS],
+                                             keep_running=lambda: self._running)
+                    logger.info("Chain volume refreshed for %d chains.", n)
+                except OpenSeaNetworkError as e:
+                    logger.warning("Chain volume skipped: OpenSea unreachable (%s).", e)
+                except Exception as e:
+                    logger.error("Error refreshing chain volume: %s", e)
+                last_chain_volume_time = time.time()
+                self.state_store.update_telemetry("last_chain_volume_time", last_chain_volume_time)
 
             # Sleep briefly before next timer tick
             time.sleep(1.0)

@@ -370,11 +370,74 @@
   }
 
   function loadOverview() {
+    loadChains();
     return api("/api/overview").then(renderOverview, function (e) {
       if (state.offline) {
         $("sideStatus").innerHTML = '<strong class="c-bad"><span class="dot"></span>Dashboard offline</strong><span class="muted">Is it still running?</span>';
       } else { toast(e.message); }
     });
+  }
+
+  // ---------- Most active chains ----------
+  var chainsLoaded = 0;
+  function chainRank(id) { var r = state.chainRanks && state.chainRanks[id]; return isNum(r) ? r : null; }
+  function loadChains(force) {
+    if (!force && Date.now() - chainsLoaded < 5 * 60 * 1000) return Promise.resolve();
+    chainsLoaded = Date.now();
+    return api("/api/chains").then(function (r) {
+      state.chains = r; state.chainRanks = {};
+      (r.chains || []).forEach(function (c) { if (isNum(c.rank)) state.chainRanks[c.id] = c.rank; });
+      renderChains();
+      if (state.candItems && $("page-candidates").classList.contains("active")) renderCandidates();
+    }, function () { chainsLoaded = 0; });
+  }
+  function bigUsd(n) {
+    if (!isNum(n)) return "–";
+    if (n >= 1e6) return "$" + fmt(n / 1e6, n >= 1e7 ? 1 : 2) + "M";
+    if (n >= 1e4) return "$" + fmt(n / 1e3, 0) + "K";
+    return "$" + fmt(n, 0);
+  }
+  function trendCell(t) {
+    if (!isNum(t)) return '<span class="muted">–</span>';
+    var pct = t - 100, cls = pct >= 10 ? "c-good" : pct <= -10 ? "c-bad" : "muted";
+    var arrow = pct >= 10 ? "↑" : pct <= -10 ? "↓" : "→";
+    return '<span class="' + cls + '">' + arrow + " " + (pct > 0 ? "+" : pct < 0 ? "−" : "") + fmt(Math.abs(pct), 0) + "%</span>";
+  }
+  function renderChains() {
+    var r = state.chains, box = $("chainsBody");
+    if (!box || !r) return;
+    var rows = (r.chains || []).filter(function (c) { return c.at; });
+    if (!rows.length) {
+      box.innerHTML = '<p class="chart-note" style="margin-top:0">The bot fills this in a few minutes after it starts, then every ' +
+        fmt(r.interval_hours || 6, 0) + " hours.</p>";
+      $("chainsSub").textContent = "NFT trading on OpenSea";
+      return;
+    }
+    var showAll = !!state.chainsAll, anyLlama = rows.some(function (c) { return isNum(c.llama_day_usd); });
+    var list = showAll ? rows : rows.slice(0, 10);
+    $("chainsSub").textContent = r.updated_at ? "Updated " + ago(r.updated_at) : "";
+    box.innerHTML = '<div class="tbl-scroll"><table class="tbl chains"><thead><tr><th>#</th><th>Chain</th><th>24h</th><th>7 days</th>' +
+      '<th title="Last 24 hours compared with the daily average of the last 7 days"><span class="lg">Today vs week</span><span class="sm">Trend</span></th><th class="hide-sm" title="How many of its top ' + int(r.per_chain) +
+      ' collections sold something in the last 24 hours">Busy today</th>' + (anyLlama ? '<th class="hide-sm" title="All NFT marketplaces, from DefiLlama">All markets 24h</th>' : "") +
+      "</tr></thead><tbody>" + list.map(function (c) {
+        var native = c.native && !isNum(c.day_usd) ? moneyText(c.native.day, c.native.symbol) : "";
+        var flags = (c.enabled ? "" : ' <span class="pill neutral" title="The bot doesn\'t scan this chain (Settings)">not scanned</span>') +
+          (c.stale ? ' <span class="pill warn" title="OpenSea didn\'t answer for this chain lately">old</span>' : "") +
+          (c.partial || c.unpriced ? ' <span class="muted" title="' + (c.unpriced ? "Some volume has no dollar price yet" : "Some collections didn\'t answer") + '">*</span>' : "");
+        return '<tr class="' + (c.enabled ? "" : "dim") + '"><td class="muted">' + (isNum(c.rank) ? c.rank : "") + "</td>" +
+          '<td class="chain-name"><a href="https://opensea.io/collections/chain/' + encodeURIComponent(c.id) + '" target="_blank" rel="noopener">' + esc(c.name) + "</a>" + flags + "</td>" +
+          '<td class="num-cell">' + (native ? esc(native) : isNum(c.day_usd) && c.day_usd > 0 ? bigUsd(c.day_usd) : '<span class="muted">quiet</span>') + "</td>" +
+          '<td class="num-cell">' + (isNum(c.week_usd) ? bigUsd(c.week_usd) : "–") + "</td>" +
+          '<td class="num-cell">' + trendCell(c.trend) + "</td>" +
+          '<td class="num-cell hide-sm">' + (isNum(c.active) ? int(c.active) + " of " + int(c.collections) : "–") + "</td>" +
+          (anyLlama ? '<td class="num-cell hide-sm">' + (isNum(c.llama_day_usd) ? bigUsd(c.llama_day_usd) : '<span class="muted">–</span>') + "</td>" : "") + "</tr>";
+      }).join("") + "</tbody></table></div>" +
+      (rows.length > 10 ? '<button class="btn ghost" type="button" id="chainsMore" style="margin-top:8px">' + (showAll ? "Show top 10" : "Show all " + rows.length + " chains") + "</button>" : "") +
+      '<p class="chart-note">Adds up the ' + int(r.per_chain) + " biggest collections on each chain by OpenSea volume, so real totals are a bit higher, " +
+      "but chains compare fairly. Refreshed every " + fmt(r.interval_hours || 6, 0) + " hours." +
+      (anyLlama ? " All markets includes Blur, Magic Eden and others, from DefiLlama, which covers only a few chains." : "") + "</p>";
+    var more = $("chainsMore");
+    if (more) more.addEventListener("click", function () { state.chainsAll = !state.chainsAll; renderChains(); });
   }
 
   // ---------- Candidates ----------
@@ -393,7 +456,8 @@
     var stopped = stoppedPassing(item, latest), checked = latest && latest.last_checked;
     return '<div class="card cand" role="button" tabindex="0" data-open="' + esc(item.slug) + '" data-date="' + esc(item.date_str) + '">' +
       '<div class="cand-head">' + art(item.slug, d.image) + '<div style="min-width:0">' + nameLine(d.name || item.slug, d.verified) +
-      '<div class="cand-meta">' + esc(chainName(d.chain)) + (isNum(d.supply) ? " · " + int(d.supply) + " items" : "") + "</div></div></div>" +
+      '<div class="cand-meta">' + esc(chainName(d.chain)) + (chainRank(d.chain) ? ' <span class="chain-rank" title="Its rank in Most active chains on Home">#' + chainRank(d.chain) + " chain</span>" : "") +
+      (isNum(d.supply) ? " · " + int(d.supply) + " items" : "") + "</div></div></div>" +
       '<dl class="kv" style="margin:0">' +
       '<div><dt>Spread over offer</dt><dd class="c-good">' + fmt(d.spread, 1) + "%</dd></div>" +
       "<div><dt>Est. profit</dt><dd>" + money(d.net, cur, then) + " <small>" + fmt(d.roi, 0) + "%</small></dd></div>" +
@@ -417,7 +481,8 @@
     ["sales_lo", "Fewest sales this week"],
     ["listed", "Fewest listed for sale"],
     ["name", "Name A–Z"],
-    ["chain", "Blockchain"]
+    ["chain", "Blockchain"],
+    ["chainrank", "Most active chain first"]
   ];
   var FILTERS = [
     ["spread", "Min spread over offer", "%", "min"],
@@ -447,7 +512,8 @@
     return {
       spread: d.spread, roi: d.roi, listed: d.listed_pct, sales: d.sales_7d,
       profit: toUsd(d.net, cur), buy: toUsd(buy, cur), minbuy: toUsd(buy, cur),
-      name: String(d.name || item.slug).toLowerCase(), chain: chainName(d.chain).toLowerCase()
+      name: String(d.name || item.slug).toLowerCase(), chain: chainName(d.chain).toLowerCase(),
+      chainrank: chainRank(d.chain)
     };
   }
   function activeFilters() {
@@ -485,6 +551,7 @@
       case "listed": return byNum("listed", 1);
       case "name": return function (a, b) { return a.m.name.localeCompare(b.m.name) || a.i - b.i; };
       case "chain": return function (a, b) { return a.m.chain.localeCompare(b.m.chain) || a.i - b.i; };
+      case "chainrank": return byNum("chainrank", 1);
       default: return function (a, b) { return a.i - b.i; };
     }
   }

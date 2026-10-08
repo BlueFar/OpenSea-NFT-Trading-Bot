@@ -83,7 +83,7 @@ def parse_collection_stats(data: Dict[str, Any]) -> CollectionStats:
         sales = item.get("sales")
         if interval == "one_day" and sales is not None:
             one_day_sales = int(sales)
-        elif interval == "seven_days" and sales is not None:
+        elif interval in ("seven_days", "seven_day") and sales is not None:
             seven_day_sales = int(sales)
 
     return CollectionStats(
