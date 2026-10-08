@@ -69,6 +69,8 @@ def collect_chain(client, chain: str, limit: int = TOP_PER_CHAIN) -> Optional[Di
             failed += 1
             continue
         cols.append({"slug": slug, **iv})
+    if failed and (not cols or failed > len(cols)):
+        return None  # mostly unanswered: keep the last good figures instead
     return {"chain": chain, "collections": cols, "failed": failed, "at": time.time()}
 
 
@@ -116,7 +118,7 @@ def refresh_chain_volume(client, state_store, chains: Iterable[str], keep_runnin
         if row is not None:
             state_store.set_chain_volume(chain, row)
             saved += 1
-    got = llama() if llama else None
+    got = llama() if llama and keep_running() else None
     if got:
         state_store.update_telemetry("defillama_nft_volume", {"at": time.time(), "chains": got})
     return saved
@@ -171,7 +173,7 @@ def summarize(saved: Dict[str, Dict[str, Any]], prices: Dict[str, float], chains
                 row["unpriced"] += int(unpriced)
             row["active"] = sum(1 for col in cols if ((col.get("day") or {}).get("sales") or 0) > 0)
             row["day_sales"], row["week_sales"] = sales["day"], sales["week"]
-            if priced_any or not native:
+            if cols and (priced_any or not native):
                 row["day_usd"], row["week_usd"] = sums["day"], sums["week"]
             if len(native) == 1:
                 sym, v = next(iter(native.items()))

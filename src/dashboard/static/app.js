@@ -389,7 +389,10 @@
       (r.chains || []).forEach(function (c) { if (isNum(c.rank)) state.chainRanks[c.id] = c.rank; });
       renderChains();
       if (state.candItems && $("page-candidates").classList.contains("active")) renderCandidates();
-    }, function () { chainsLoaded = 0; });
+    }, function () {
+      chainsLoaded = 0;
+      if (!state.chains && $("chainsBody")) $("chainsBody").innerHTML = '<p class="chart-note" style="margin-top:0">Couldn\'t load the chain list. Trying again shortly.</p>';
+    });
   }
   function bigUsd(n) {
     if (!isNum(n)) return "–";

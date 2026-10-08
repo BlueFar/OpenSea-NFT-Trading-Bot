@@ -108,3 +108,17 @@ def test_chains_endpoint(tmp_path):
     assert status == 200 and len(r["chains"]) == 27
     assert r["chains"][0]["id"] == "base" and r["chains"][0]["day_usd"] == 3000.0 and r["chains"][0]["rank"] == 1
     assert r["interval_hours"] == 6.0
+
+
+def test_a_chain_whose_stats_all_fail_keeps_its_last_figures(tmp_path):
+    store = StateStore(str(tmp_path / "bot.db"))
+    client = FakeClient({"base": {"collections": [{"collection": "b1"}, {"collection": "b2"}]}},
+                        {"b1": stats(2, 14), "b2": stats(1, 7)})
+    refresh_chain_volume(client, store, ["base"], llama=None)
+    client.stat = {}
+    refresh_chain_volume(client, store, ["base"], llama=None)
+    cols = store.get_chain_volume()["base"]["data"]["collections"]
+    assert [c["slug"] for c in cols] == ["b1", "b2"]
+    out = summarize({"base": {"data": {"at": time.time(), "failed": 0, "collections": []}}}, {"ETH": 1.0},
+                    [{"id": "base", "name": "Base", "enabled": True}])
+    assert out["chains"][0]["day_usd"] is None and out["chains"][0]["rank"] is None
