@@ -307,7 +307,9 @@
       '<circle class="fill" cx="27" cy="27" r="22" stroke-dasharray="' + C.toFixed(2) + '" stroke-dashoffset="' + off.toFixed(2) + '" transform="rotate(-90 27 27)"/>' +
       '<text x="27" y="32" text-anchor="middle">' + days + "/7</text></svg>" +
       '<div><div style="font-weight:650">' + (fh.ready ? "Ready" : "Day " + days + " of 7") + '</div><div class="stat-sub">' +
-      (fh.ready ? fmt(fh.days, 0) + " days of floor prices saved" : "7-day price check ready from " + esc(fmtDay(fh.ready_on + "T12:00:00"))) + "</div></div>";
+      (fh.ready ? fmt(fh.days, 0) + " days of floor prices saved" : fh.provider_fallback
+        ? "Own 7-day history from " + esc(fmtDay(fh.ready_on + "T12:00:00")) + "; OpenSea's floor history is used until then"
+        : "7-day price check ready from " + esc(fmtDay(fh.ready_on + "T12:00:00"))) + "</div></div>";
   }
 
   function renderBanner(o) {
@@ -315,7 +317,7 @@
     if (o.state === "paused") {
       b = '<div class="banner warn">' + I_WARN + "<div><strong>No internet" + (o.offline_since ? " since " + fmtTime(o.offline_since) : "") +
         ".</strong> Nothing is being marked as failed while the connection is down. After a power cut, the Mac and the bot both start again by themselves.</div></div>";
-    } else if (!o.floor_history.ready && o.rules_enabled.floor_change_7d) {
+    } else if (!o.floor_history.ready && o.rules_enabled.floor_change_7d && !o.floor_history.provider_fallback) {
       b = '<div class="banner">' + I_CLOCK + "<div><strong>First week: building floor history.</strong> The 7-day price check needs a week of saved floor prices, so candidates can't appear before " +
         esc(fmtDay(o.floor_history.ready_on + "T12:00:00")) + ". Everything else is being checked already.</div></div>";
     }
@@ -366,6 +368,10 @@
       (o.skipped_unverified ? " · " + int(o.skipped_unverified) + " skipped (no blue tick)" : "");
     $("statShort").textContent = int(o.shortlisted);
     $("statCand").textContent = int(o.candidates_7d);
+    // Folders keep every day's Info.md, including collections that failed a later check, so say how the numbers relate
+    $("statCandSub").textContent = "still passing every rule that's switched on" +
+      (o.passed_7d > o.candidates_7d ? " · " + int(o.passed_7d) + " passed this week, " + int(o.passed_7d - o.candidates_7d) + " failed a later check" : "") +
+      (o.dossiers_7d ? " · " + int(o.dossiers_7d) + " Info.md files (one per day passed)" : "");
     $("badgeCand").textContent = o.candidates_7d;
   }
 

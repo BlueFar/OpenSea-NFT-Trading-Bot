@@ -20,6 +20,18 @@ def sanitize_folder_name(name: str) -> str:
     sanitized = re.sub(r'[-\s]+', '-', sanitized).strip(' .-_')
     return sanitized or "unnamed_project"
 
+def _info_md_slug(info_path: str) -> Optional[str]:
+    """The collection slug recorded in an existing Info.md, or None when there is no readable file."""
+    try:
+        with open(info_path, "r", encoding="utf-8") as f:
+            for line in f:
+                m = re.match(r"- \*\*Collection Slug\*\*: (.+)$", line.strip())
+                if m:
+                    return m.group(1).strip()
+    except OSError:
+        return None
+    return ""
+
 def render_info_md(
     collection: CollectionMetadata,
     sales_metrics: SalesMetrics,
@@ -300,6 +312,11 @@ def write_candidate_info_md(
     """
     sanitized_name = sanitize_folder_name(collection.name or collection.slug)
     project_dir = os.path.join(data_root, date_str, sanitized_name)
+    # Two collections can have names that clean up to the same folder (e.g. "Pixels - Farm Land" and
+    # "Pixels Farm Land"). Never overwrite another collection's Info.md: give this one its own folder.
+    owner = _info_md_slug(os.path.join(project_dir, "Info.md"))
+    if owner is not None and owner != collection.slug:
+        project_dir = os.path.join(data_root, date_str, sanitize_folder_name(f"{sanitized_name}-{collection.slug}"))
     os.makedirs(project_dir, exist_ok=True)
 
     info_path = os.path.join(project_dir, "Info.md")

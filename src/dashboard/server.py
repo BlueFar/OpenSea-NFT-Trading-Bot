@@ -257,6 +257,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             ready_on = time.strftime("%Y-%m-%d", time.localtime(base + 7 * 86400))
 
         recent = store.get_results_since(self._days_ago(0), limit=25)
+        passes7 = store.get_results_since(since7, passes_only=True)
         verification = cfg.filters.verification
         self._send_json({
             **run,
@@ -265,13 +266,16 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             "offline_since": _telemetry_value(telemetry, "offline_since"),
             "checked_today": store.count_results_on(self._today()),
             "shortlisted": store.count_shortlisted(),
-            "candidates_7d": self._still_passing(store.get_results_since(since7, passes_only=True)),
+            "candidates_7d": self._still_passing(passes7),
+            "passed_7d": len({r["slug"] for r in passes7}),
+            "dossiers_7d": self._count_info_files(since7),
             "universe": summary.get("total_monitored_collections", 0),
             "skipped_unverified": store.count_skipped_unverified(verification.required_status)
             if cfg.discovery.skip_unverified and verification.enabled else 0,
             "chains_enabled": len(cfg.discovery.chains),
             "chain_counts": store.count_by_chain(),
-            "floor_history": {"days": round(history_days, 2), "ready": history_days >= 7, "ready_on": ready_on},
+            "floor_history": {"days": round(history_days, 2), "ready": history_days >= 7, "ready_on": ready_on,
+                              "provider_fallback": bool(cfg.floor_history.use_provider_endpoint)},
             "funnel": store.get_rejection_funnel(since7),
             "events": store.get_recent_events(20),
             "recent_results": recent,
@@ -312,6 +316,19 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         limit = int(query.get("limit", [100])[0])
         collections = self.state_store.get_all_monitored_collections(search=search, limit=limit)
         self._send_json({"collections": collections, "count": len(collections)})
+
+    def _count_info_files(self, since_date_str: str) -> int:
+        """Info.md files on disk in day folders from since_date_str on (one per collection per day it passed)."""
+        root = os.path.abspath(self.config.general.data_root)
+        if not os.path.isdir(root):
+            return 0
+        n = 0
+        for day in os.listdir(root):
+            day_path = os.path.join(root, day)
+            if len(day) != 10 or day < since_date_str or not os.path.isdir(day_path):
+                continue
+            n += sum(1 for proj in os.listdir(day_path) if os.path.isfile(os.path.join(day_path, proj, "Info.md")))
+        return n
 
     def _still_passing(self, passes) -> int:
         """Collections that passed in the period and haven't failed a later check."""

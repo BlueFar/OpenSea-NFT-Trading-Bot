@@ -1,3 +1,4 @@
+import os
 """How each sale happened (listing bought or offer accepted), rare items at floor price, offer sales in 14 days,
 and the candidate list showing each collection's latest check."""
 import tempfile
@@ -303,6 +304,14 @@ def test_candidates_endpoint_sends_latest_and_home_counts_only_still_passing(tmp
         assert status == 200 and set(r["latest"]) == {"a", "b"} and r["latest"]["b"]["pass"] is False
         status, o = _call("GET", "/api/overview", cfg, store, ev, cfg_path)
         assert status == 200 and o["candidates_7d"] == 1
+        # Home also says how many passed this week and how many Info.md files that left on disk
+        assert o["passed_7d"] == 2 and o["dossiers_7d"] == 0
+        for slug in ("a", "b"):
+            d = os.path.join(cfg.general.data_root, today, slug)
+            os.makedirs(d, exist_ok=True)
+            open(os.path.join(d, "Info.md"), "w").close()
+        status, o = _call("GET", "/api/overview", cfg, store, ev, cfg_path)
+        assert o["dossiers_7d"] == 2
 
 
 def test_review_fixes_old_sales_trait_shape_and_passing_again(tmp_path):
