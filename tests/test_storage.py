@@ -140,3 +140,26 @@ def test_state_store_monitored_collections():
         next_due = store.get_collections_due_for_evaluation(limit=2)
         assert due[0] not in next_due
 
+
+
+def test_info_md_never_overwrites_another_collection_with_the_same_folder_name():
+    with tempfile.TemporaryDirectory() as temp_dir:
+        def write(slug, name):
+            col = CollectionMetadata(slug=slug, name=name, contracts=[Contract(address="0xabc", chain="ethereum")])
+            now = datetime.now(timezone.utc)
+            return write_candidate_info_md(
+                data_root=temp_dir, date_str="2026-10-09", collection=col,
+                sales_metrics=SalesMetrics(0, 0, 0.0, 0.0, 0, 0, 0, 0, daily_breakdown=[]), floor_metrics=FloorPriceMetrics(current_floor=1.0),
+                listing_metrics=ListingMetrics(), trade_economics=TradeEconomics(
+                    observed=ObservedMarketData(), assumptions=TradeAssumptions(), modelled=ModelledResults()),
+                filter_report=FilterEvaluationReport(collection_slug=slug, is_overall_pass=True),
+                detection_dt_utc=now, detection_dt_local=now)
+
+        first = write("pixels-farm", "Pixels - Farm Land")
+        second = write("pixels-farm-land-ronin", "Pixels Farm Land")
+        assert first != second and os.path.exists(first) and os.path.exists(second)
+        assert os.path.basename(os.path.dirname(second)) == "Pixels-Farm-Land-pixels-farm-land-ronin"
+        assert "Collection Slug**: pixels-farm\n" in open(first, encoding="utf-8").read()
+        # Re-checks later the same day still land in each collection's own folder
+        assert write("pixels-farm", "Pixels - Farm Land") == first
+        assert write("pixels-farm-land-ronin", "Pixels Farm Land") == second

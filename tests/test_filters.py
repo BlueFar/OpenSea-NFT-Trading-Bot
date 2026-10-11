@@ -21,11 +21,11 @@ def filter_engine():
     return FilterEngine(config)
 
 def test_trading_frequency_filter_boundaries(filter_engine):
-    """Test 0/day PASS, 1/day PASS, 2/day PASS, 3/day FAIL."""
+    """Test 0/day FAIL (no sale in 7 days), 1/day PASS, 2/day PASS, 3/day FAIL."""
     now_utc = datetime.now(timezone.utc)
     col = make_sample_collection()
 
-    for avg_tx, expected_status in [(0.0, FilterResultStatus.PASS), (1.0, FilterResultStatus.PASS), (2.0, FilterResultStatus.PASS), (3.0, FilterResultStatus.FAIL)]:
+    for avg_tx, expected_status in [(0.0, FilterResultStatus.FAIL), (1.0, FilterResultStatus.PASS), (2.0, FilterResultStatus.PASS), (3.0, FilterResultStatus.FAIL)]:
         sales_metrics = SalesMetrics(
             seven_day_sales_items=int(avg_tx * 7),
             seven_day_sales_transactions=int(avg_tx * 7),
@@ -39,6 +39,30 @@ def test_trading_frequency_filter_boundaries(filter_engine):
         )
         res = filter_engine._eval_trading_frequency(sales_metrics, now_utc.isoformat())
         assert res.result == expected_status, f"Failed for avg_tx={avg_tx}: got {res.result}"
+
+def _week(total):
+    return SalesMetrics(
+        seven_day_sales_items=total, seven_day_sales_transactions=total,
+        average_sales_items_per_day=total / 7, average_transactions_per_day=total / 7,
+        max_daily_sales_items=min(total, 1), max_daily_transactions=min(total, 1),
+        min_daily_sales_items=0, min_daily_transactions=0, data_quality=DataQualityState.AVAILABLE,
+    )
+
+def test_trading_frequency_min_sales_in_week(filter_engine):
+    """At least min_sales_7d sales in 7 days; 0 switches the minimum off."""
+    now = datetime.now(timezone.utc).isoformat()
+    res = filter_engine._eval_trading_frequency(_week(0), now)
+    assert res.result == FilterResultStatus.FAIL
+    assert "No sales in the last 7 days" in res.notes
+    assert filter_engine._eval_trading_frequency(_week(1), now).result == FilterResultStatus.PASS
+
+    filter_engine.config.trading_frequency.min_sales_7d = 3
+    res = filter_engine._eval_trading_frequency(_week(2), now)
+    assert res.result == FilterResultStatus.FAIL and "Only 2 sales" in res.notes
+    assert filter_engine._eval_trading_frequency(_week(3), now).result == FilterResultStatus.PASS
+
+    filter_engine.config.trading_frequency.min_sales_7d = 0
+    assert filter_engine._eval_trading_frequency(_week(0), now).result == FilterResultStatus.PASS
 
 def test_floor_change_1d_boundaries(filter_engine):
     """Test 7.99% PASS, 8.00% FAIL, 8.01% FAIL (< 8.0%)."""
