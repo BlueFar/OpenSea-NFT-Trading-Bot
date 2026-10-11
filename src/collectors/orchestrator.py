@@ -1,5 +1,4 @@
 import math
-import os
 import time
 from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timezone
@@ -21,7 +20,6 @@ from ..metrics.floor_sales import (
 from ..utils.prices import prices_from_payment_tokens, usd_rate
 from ..storage.state_store import StateStore
 from ..storage.file_writer import write_candidate_info_md
-from ..storage.candidate_files import default_trash, is_data_problem, remove_info_folders
 from ..config.settings import BotConfig
 from ..config.chains import currency_groups, same_currency, gas_estimate
 from ..utils.notify import mac_notification
@@ -85,8 +83,6 @@ class CollectionEvaluator:
         self.last_details: Optional[Dict[str, Any]] = None  # details of the latest full evaluation
         self._prices_saved_at: Dict[str, float] = {}
         self._older_sales: Dict[str, Tuple[Tuple[int, int], List[SaleEvent]]] = {}
-        self._clear_on_fail = False  # set per check: only the bot's own re-checks clear folders
-        self.trash = default_trash()
         try:  # dollar prices seen before, until this run sees fresh ones
             self._last_prices: Dict[str, float] = {k: v["usd"] for k, v in state_store.get_usd_prices().items()}
         except Exception:
@@ -138,31 +134,9 @@ class CollectionEvaluator:
             slug, date_str, is_pass=False, reasons=f"{filter_name}: {reason}",
             reject_filter=filter_name, details=details,
         )
-        if not is_data_problem(reason):
-            self.clear_candidate_folders(slug)
         if not keep_shortlisted and filter_name in ("project_age", "verification", "total_supply",
                                                     "listed_items", "trading_frequency"):
             self.state_store.set_shortlisted(slug, False)
-
-    def clear_candidate_folders(self, slug: str) -> int:
-        """
-        A rule failed on a re-check: the collection leaves the candidate list, so its Info.md folders leave the
-        data folder (to the Trash on a Mac). It gets a fresh folder if it passes again.
-        """
-        if not self._clear_on_fail or not self.config.general.remove_stopped_candidates:
-            return 0
-        paths = [r["path"] for r in self.state_store.get_info_paths(slug)]
-        moved = remove_info_folders(paths, self.config.general.data_root, self.trash)
-        if moved:
-            logger.info("[%s] Stopped passing: moved %d Info.md folder(s) out of the data folder.", slug, len(moved))
-        return len(moved)
-
-    def _todays_info_exists(self, slug: str, date_str: str, dry_run: bool) -> bool:
-        """Today's Info.md is still there (it's gone if a check failed in between and cleared it)."""
-        if dry_run:
-            return True
-        paths = [r["path"] for r in self.state_store.get_info_paths(slug) if r["date_str"] == date_str]
-        return not paths or any(os.path.isfile(p) for p in paths)
 
     def _pace_limit(self, sales_metrics: SalesMetrics, value: Any) -> Tuple[Optional[float], str, str, Any]:
         """Which part of Trading pace to show: sales per day, sales this week, or sales at floor price."""
@@ -285,7 +259,6 @@ class CollectionEvaluator:
         If stop_on_first_failure is True, halts early when a hard filter that is switched on fails.
         Raises OpenSeaNetworkError when OpenSea cannot be reached, so nothing is recorded as failed.
         """
-        self._clear_on_fail = stop_on_first_failure and not dry_run
         dt_utc = now_utc()
         tz_name = self.config.general.bot_timezone
         dt_local = now_local(tz_name)
@@ -672,8 +645,6 @@ class CollectionEvaluator:
                     reject_filter=first_failed,
                     details=details,
                 )
-                if any(c.result == FilterResultStatus.FAIL for c in report.criteria.values()):
-                    self.clear_candidate_folders(slug)
             return report
 
         logger.info("[%s] ALL DETERMINISTIC FILTERS PASSED! (Candidate detected for %s)", slug, date_str)
@@ -681,7 +652,7 @@ class CollectionEvaluator:
         # -------------------------------------------------------------
         # STEP 7: Handoff Creation & Deduplication
         # -------------------------------------------------------------
-        if self.state_store.is_candidate_recorded_today(slug, date_str) and self._todays_info_exists(slug, date_str, dry_run):
+        if self.state_store.is_candidate_recorded_today(slug, date_str):
             logger.info("[%s] Already recorded as candidate for today (%s). Skipping duplicate file creation.", slug, date_str)
             if stop:
                 self.state_store.set_last_result_pass(slug)  # passing again after a failed check earlier today
