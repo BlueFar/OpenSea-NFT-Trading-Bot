@@ -27,6 +27,9 @@ reload_env()
 class GeneralConfig(BaseModel):
     bot_timezone: str = "Asia/Kolkata"
     data_root: str = "./data"
+    # Info.md folders of candidates that fail a later check are moved here (same YYYY-MM-DD/<Project> layout),
+    # so data_root only holds collections that still pass. Empty string = delete them instead.
+    removed_root: str = "./data_removed"
     state_db_path: str = "./state/bot.db"
     log_level: str = "INFO"
 

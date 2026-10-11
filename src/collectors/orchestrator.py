@@ -1,4 +1,5 @@
 import math
+import os
 import time
 from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timezone
@@ -19,7 +20,7 @@ from ..metrics.floor_sales import (
 )
 from ..utils.prices import prices_from_payment_tokens, usd_rate
 from ..storage.state_store import StateStore
-from ..storage.file_writer import write_candidate_info_md
+from ..storage.file_writer import write_candidate_info_md, remove_candidate_dossier
 from ..config.settings import BotConfig
 from ..config.chains import currency_groups, same_currency, gas_estimate
 from ..utils.notify import mac_notification
@@ -81,6 +82,7 @@ class CollectionEvaluator:
         self.config = config
         self.filter_engine = FilterEngine(config.filters)
         self.last_details: Optional[Dict[str, Any]] = None  # details of the latest full evaluation
+        self._dry_run = False
         self._prices_saved_at: Dict[str, float] = {}
         self._older_sales: Dict[str, Tuple[Tuple[int, int], List[SaleEvent]]] = {}
         try:  # dollar prices seen before, until this run sees fresh ones
@@ -134,9 +136,41 @@ class CollectionEvaluator:
             slug, date_str, is_pass=False, reasons=f"{filter_name}: {reason}",
             reject_filter=filter_name, details=details,
         )
+        self.remove_dossiers(slug, reason, rule=filter_name, dry_run=self._dry_run)
         if not keep_shortlisted and filter_name in ("project_age", "verification", "total_supply",
                                                     "listed_items", "trading_frequency"):
             self.state_store.set_shortlisted(slug, False)
+
+    # A failed download of the collection's details says nothing about the rules: keep its Info.md.
+    KEEP_DOSSIER_RULES = ("collection_fetch",)
+
+    def remove_dossiers(self, slug: str, reason: str = "", rule: Optional[str] = None, dry_run: bool = False) -> int:
+        """
+        Takes every Info.md folder of a collection that just failed a check out of data_root, so the
+        candidate folders only hold collections that still pass. It gets a new Info.md if it passes again.
+        """
+        rule = rule or (self.state_store.get_latest_results([slug]).get(slug) or {}).get("rule")
+        if dry_run or rule in self.KEEP_DOSSIER_RULES:
+            return 0
+        g = self.config.general
+        moved = 0
+        for path in self.state_store.get_dossier_paths(slug):
+            try:
+                if remove_candidate_dossier(path, slug, g.data_root, g.removed_root) is not None:
+                    moved += 1
+            except OSError as e:
+                logger.warning("[%s] Could not remove %s: %s", slug, path, e)
+        if moved:
+            where = f"moved to {g.removed_root}" if g.removed_root else "deleted"
+            logger.info("[%s] No longer passes: %d Info.md folder(s) %s.", slug, moved, where)
+            self.state_store.log_event("candidate_removed", f"No longer a candidate: {slug} ({reason or rule}). "
+                                       f"{moved} Info.md folder{'s' if moved != 1 else ''} {where}.")
+        return moved
+
+    def remove_all_failing_dossiers(self) -> int:
+        """Sweep: removes the Info.md folders of every collection whose most recent check failed."""
+        return sum(self.remove_dossiers(slug) for slug in
+                   self.state_store.get_failing_candidate_slugs(skip_rules=self.KEEP_DOSSIER_RULES))
 
     def _pace_limit(self, sales_metrics: SalesMetrics, value: Any) -> Tuple[Optional[float], str, str, Any]:
         """Which part of Trading pace to show: sales per day, sales this week, or sales at floor price."""
@@ -265,6 +299,7 @@ class CollectionEvaluator:
         date_str = dt_local.strftime("%Y-%m-%d")
         filters = self.config.filters
         stop = stop_on_first_failure
+        self._dry_run = dry_run
 
         logger.info("Evaluating collection: %s", slug)
 
@@ -645,6 +680,7 @@ class CollectionEvaluator:
                     reject_filter=first_failed,
                     details=details,
                 )
+                self.remove_dossiers(slug, details.get("reason") or first_failed or "", rule=first_failed, dry_run=dry_run)
             return report
 
         logger.info("[%s] ALL DETERMINISTIC FILTERS PASSED! (Candidate detected for %s)", slug, date_str)
@@ -652,7 +688,10 @@ class CollectionEvaluator:
         # -------------------------------------------------------------
         # STEP 7: Handoff Creation & Deduplication
         # -------------------------------------------------------------
-        if self.state_store.is_candidate_recorded_today(slug, date_str):
+        today = self.state_store.get_result(slug, date_str) if self.state_store.is_candidate_recorded_today(slug, date_str) else None
+        if today and not dry_run and not os.path.exists((today.get("details") or {}).get("info_md") or ""):
+            logger.info("[%s] Passes again today after its Info.md was removed: writing a new one.", slug)
+        elif today:
             logger.info("[%s] Already recorded as candidate for today (%s). Skipping duplicate file creation.", slug, date_str)
             if stop:
                 self.state_store.set_last_result_pass(slug)  # passing again after a failed check earlier today

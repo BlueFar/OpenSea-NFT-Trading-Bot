@@ -163,6 +163,17 @@ class NFTBot:
             self.state_store.log_event("online", f"Internet is back after {minutes:.0f} minutes. Carrying on.")
             logger.info("Internet connection restored after %.1f minutes.", minutes)
 
+    def _remove_failing_dossiers(self) -> int:
+        """Takes the Info.md folders of collections whose latest check failed out of data_root."""
+        try:
+            n = self.evaluator.remove_all_failing_dossiers()
+        except Exception as e:  # tidying up must never stop the bot
+            logger.error("Could not remove Info.md folders of collections that stopped passing: %s", e)
+            return 0
+        if n:
+            logger.info("Removed %d Info.md folder(s) of collections that no longer pass.", n)
+        return n
+
     def run_daemon(self, dry_run: bool = False):
         """
         Runs the 24/7 monitoring loop with independently scheduled:
@@ -180,6 +191,8 @@ class NFTBot:
         self.state_store.update_telemetry("started_at", time.time())
         control.write_pid_file(os.getpid())
         self.state_store.log_event("start", "Bot started" + (" (dry run: no Info.md files)." if dry_run else "."))
+        if not dry_run:
+            self._remove_failing_dossiers()
 
         last_discovery_time = 0.0
         last_evaluation_time = 0.0
@@ -335,6 +348,7 @@ def main():
 
     # status command
     subparsers.add_parser("status", help="Show bot health and discovery status")
+    subparsers.add_parser("remove-failing", help="Take Info.md folders of collections whose latest check failed out of data_root")
 
     # ui / dashboard command
     dashboard_parser = subparsers.add_parser("ui", aliases=["dashboard"], help="Launch local web UI dashboard")
@@ -371,6 +385,11 @@ def main():
         bot.inspect_collection(args.collection, dry_run=is_dry)
     elif args.command == "status":
         bot.show_status()
+    elif args.command == "remove-failing":
+        n = bot._remove_failing_dossiers()
+        g = cfg.general
+        print(f"Removed {n} Info.md folder(s) of collections that no longer pass"
+              + (f" (moved to {g.removed_root})." if g.removed_root else " (deleted)."))
     else:
         bot.run_daemon(dry_run=args.dry_run)
 

@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 from ..models.collection import CollectionMetadata
@@ -344,3 +345,33 @@ def write_candidate_info_md(
 
     os.replace(tmp_path, info_path)
     return info_path
+
+
+def remove_candidate_dossier(info_path: str, slug: str, data_root: str, removed_root: str = "") -> Optional[str]:
+    """
+    Takes a candidate's Info.md folder (DATA_ROOT/YYYY-MM-DD/<Project>) out of data_root.
+    Moves it to removed_root/YYYY-MM-DD/<Project> (any Fundamentals.md goes with it), or deletes it
+    when removed_root is empty. Only touches a folder inside data_root whose Info.md names this slug.
+    Returns where the folder went ("" when deleted), or None when nothing was removed.
+    """
+    if not info_path:
+        return None
+    root = os.path.realpath(data_root)
+    project_dir = os.path.dirname(os.path.realpath(info_path))
+    day_dir = os.path.dirname(project_dir)
+    if os.path.basename(info_path) != "Info.md" or os.path.dirname(day_dir) != root:
+        return None
+    if _info_md_slug(os.path.join(project_dir, "Info.md")) != slug:
+        return None  # gone already, or the folder now holds another collection's Info.md
+    if not removed_root:
+        shutil.rmtree(project_dir)
+        return ""
+    target_day = os.path.join(removed_root, os.path.basename(day_dir))
+    os.makedirs(target_day, exist_ok=True)
+    target = os.path.join(target_day, os.path.basename(project_dir))
+    n = 2
+    while os.path.exists(target):  # removed before, passed again and failed again the same day
+        target = os.path.join(target_day, f"{os.path.basename(project_dir)}-{n}")
+        n += 1
+    shutil.move(project_dir, target)
+    return target

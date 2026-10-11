@@ -25,7 +25,7 @@
     unknown: "Other", PASS: "Passed every rule"
   };
   var EVENT_COLORS = { candidate: "c-good", offline: "c-warn", error: "c-bad", online: "c-accent", start: "c-accent",
-                       restart: "c-accent", stop: "c-muted", settings: "c-muted" };
+                       restart: "c-accent", stop: "c-muted", settings: "c-muted", candidate_removed: "c-muted" };
 
   var state = { overview: null, settings: null, draft: null, candDays: 7, near: null, tz: undefined, offline: false,
                 prices: {}, aliases: {}, candItems: null };

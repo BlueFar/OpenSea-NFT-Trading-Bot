@@ -1,6 +1,9 @@
 general:
   bot_timezone: "Asia/Kolkata"
   data_root: "./data"
+  # When a candidate fails a later check, its Info.md folders are moved out of data_root into this folder
+  # (same YYYY-MM-DD/<Project> layout), so data_root only holds collections that still pass. "" = delete them.
+  removed_root: "./data_removed"
   state_db_path: "./state/bot.db"
   log_level: "INFO"
 

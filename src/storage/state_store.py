@@ -317,6 +317,26 @@ class StateStore:
             c.execute("SELECT 1 FROM candidate_history WHERE slug=? AND date_str=? AND is_pass=1", (slug, date_str))
             return c.fetchone() is not None
 
+    def get_dossier_paths(self, slug: str) -> List[str]:
+        """Info.md paths written for this collection's passing days."""
+        with self._get_connection() as conn:
+            rows = conn.execute("""
+                SELECT json_extract(details, '$.info_md') FROM candidate_history
+                WHERE slug=? AND is_pass=1 AND json_extract(details, '$.info_md') IS NOT NULL
+            """, (slug,)).fetchall()
+        return [r[0] for r in rows]
+
+    def get_failing_candidate_slugs(self, skip_rules: Iterable[str] = ()) -> List[str]:
+        """Collections that passed on some day but whose most recent check failed."""
+        skip = list(skip_rules)
+        with self._get_connection() as conn:
+            rows = conn.execute(f"""
+                SELECT DISTINCT h.slug FROM candidate_history h JOIN monitored_collections m ON m.slug = h.slug
+                WHERE h.is_pass=1 AND m.last_result_pass=0
+                {"AND COALESCE(m.last_result_rule, '') NOT IN (" + ",".join("?" * len(skip)) + ")" if skip else ""}
+            """, skip).fetchall()
+        return [r[0] for r in rows]
+
     def record_candidate(self, slug: str, date_str: str, is_pass: bool, reasons: str = "",
                          reject_filter: Optional[str] = None, details: Optional[Dict[str, Any]] = None):
         """
