@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .env
 data/
+data_removed/
 state/*.db
 state/*.pid
 *.log
