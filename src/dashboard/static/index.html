@@ -31,6 +31,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5"/></svg>
         Near misses <span class="badge num" id="badgeNear">0</span>
       </button>
+      <button data-page="sim">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5"/><path d="M4 19h16"/><path d="M7 15l3-4 3 2 5-6"/><circle cx="18" cy="7" r="1.6"/></svg>
+        Simulation
+      </button>
       <button data-page="check">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
         Check a collection
@@ -128,6 +132,35 @@
       </div>
     </section>
 
+    <!-- SIMULATION -->
+    <section class="page" id="page-sim" aria-labelledby="h-sim">
+      <div class="page-head">
+        <div>
+          <h1 id="h-sim">Simulation</h1>
+          <p>Paper trading on live OpenSea prices: hold the best offer, then sell what fills just under the floor. Nothing is bought or sold.</p>
+        </div>
+      </div>
+      <div id="simBanner"></div>
+      <div class="stats" id="simStats"></div>
+      <div class="card panel sim-rules" id="simRules"></div>
+      <div class="sim-grid" id="simGrid"><div class="loading">Loading…</div></div>
+      <form class="card search sim-add" id="simAddForm" autocomplete="off">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        <input id="simAddInput" type="text" placeholder="Add a collection: OpenSea link or collection name" aria-label="OpenSea link or collection name to add">
+        <button class="btn primary" type="submit">Add</button>
+      </form>
+      <div class="two-col">
+        <div class="card panel">
+          <div class="section-title"><h2>Completed trades</h2><span id="simTradesSub">Bought and sold</span></div>
+          <div id="simTrades"></div>
+        </div>
+        <div class="card panel">
+          <div class="section-title"><h2>What happened</h2><span>Newest first</span></div>
+          <ul class="feed sim-feed" id="simFeed"></ul>
+        </div>
+      </div>
+    </section>
+
     <!-- CHECK -->
     <section class="page" id="page-check" aria-labelledby="h-check">
       <div class="page-head">
@@ -184,5 +217,6 @@
 <aside class="drawer" id="drawer" aria-hidden="true" aria-labelledby="drawerTitle"></aside>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script src="/static/app.js"></script>
+<script src="/static/sim.js"></script>
 </body>
 </html>

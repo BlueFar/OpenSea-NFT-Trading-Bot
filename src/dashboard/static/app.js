@@ -186,6 +186,7 @@
     if (page === "candidates") loadCandidates();
     if (page === "near") loadNear();
     if (page === "settings" && !isDirty()) loadSettings();
+    if (page === "sim" && window.SimPage) window.SimPage.load();
   }
   document.querySelectorAll(".nav button").forEach(function (b) { b.addEventListener("click", function () { go(b.getAttribute("data-page")); }); });
 
@@ -1045,7 +1046,12 @@
     var page = (location.hash || "#home").slice(1);
     if (page === "candidates") loadCandidates();
     if (page === "near") loadNear();
+    if (page === "sim" && window.SimPage) window.SimPage.load();
   }
+  // Shared with sim.js (the Simulation page)
+  window.NFTM = { api: api, post: post, esc: esc, isNum: isNum, fmt: fmt, int: int, money: money, moneyText: moneyText,
+                  toUsd: toUsd, usd: usd, signed: signed, ago: ago, fmtDay: fmtDay, fmtTime: fmtTime, art: art,
+                  chainName: chainName, toast: toast, cap: cap };
   loadPrices();
   setInterval(loadPrices, 5 * 60 * 1000);
   loadSettings().then(function () {

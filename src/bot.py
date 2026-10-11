@@ -23,6 +23,7 @@ from .providers.opensea.provider import OpenSeaProvider
 from .discovery.engine import DiscoveryEngine
 from .collectors.orchestrator import CollectionEvaluator
 from .collectors.chain_volume import refresh_chain_volume
+from .simulation.engine import PaperTrader
 from .config.chains import CHAINS
 from .utils.logging import setup_logger
 from .utils.time import now_local
@@ -65,6 +66,8 @@ class NFTBot:
             state_store=self.state_store,
             config=self.config,
         )
+        self.simulator = PaperTrader(self.provider, self.state_store, self.config)
+        self._last_sim_time = 0.0
         # Seed watchlist into monitored collections universe if present
         if self.config.discovery.watchlist:
             self.state_store.add_discovered_slugs(self.config.discovery.watchlist, source="watchlist")
@@ -118,6 +121,7 @@ class NFTBot:
             logger.info("OpenSea API key changed in .env. Using the new key.")
         self.discovery.config = new_cfg.discovery
         self.evaluator = CollectionEvaluator(provider=self.provider, state_store=self.state_store, config=new_cfg)
+        self.simulator.config = new_cfg
         logger.info("Settings changed. Using the new settings from the next check.")
         self.state_store.log_event("settings", "New settings are in use.")
 
@@ -173,6 +177,21 @@ class NFTBot:
         if n:
             logger.info("Removed %d Info.md folder(s) of collections that no longer pass.", n)
         return n
+
+    def _maybe_run_simulation(self) -> None:
+        """Paper trading (Simulation page): checks its offers and listings every simulation.interval_seconds."""
+        sim = self.config.simulation
+        if not sim.enabled or time.time() - self._last_sim_time < sim.interval_seconds:
+            return
+        self._last_sim_time = time.time()
+        try:
+            n = self.simulator.tick(keep_running=lambda: self._running)
+            if n:
+                logger.info("Simulation: checked %d collection(s).", n)
+        except OpenSeaNetworkError as e:
+            logger.warning("Simulation check skipped: OpenSea unreachable (%s).", e)
+        except Exception as e:  # the simulation must never stop the bot
+            logger.error("Simulation check failed: %s", e)
 
     def run_daemon(self, dry_run: bool = False):
         """
@@ -234,6 +253,7 @@ class NFTBot:
                     for slug in slugs_to_eval:
                         if not self._running:
                             break
+                        self._maybe_run_simulation()  # a long refresh cycle doesn't hold the simulation up
                         try:
                             self.evaluator.evaluate_collection(slug=slug, dry_run=dry_run, stop_on_first_failure=True)
                             self.state_store.mark_collection_evaluated(slug)
@@ -253,7 +273,10 @@ class NFTBot:
                     logger.info("Candidate refresh cycle: no collections currently in monitored universe.")
                     last_evaluation_time = now
 
-            # 3. How busy each chain is, for the dashboard (after the first evaluation round)
+            # 3. Paper trading
+            self._maybe_run_simulation()
+
+            # 4. How busy each chain is, for the dashboard (after the first evaluation round)
             every = self.config.scheduler.chain_volume_interval_seconds
             if every > 0 and last_evaluation_time and time.time() - last_chain_volume_time >= every:
                 logger.info("Refreshing NFT volume per chain...")

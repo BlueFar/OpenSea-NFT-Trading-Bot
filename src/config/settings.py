@@ -134,6 +134,16 @@ class RuntimeConfig(BaseModel):
     notification_sound: bool = False
     ipv4_only: bool = True                    # Connect to OpenSea over IPv4 only (broken home IPv6 stalls every call)
 
+class SimulationConfig(BaseModel):
+    """Paper trading: hold the best offer on these collections and sell what fills just under the floor."""
+    enabled: bool = True
+    collections: List[str] = Field(default_factory=list)  # OpenSea collection slugs
+    interval_seconds: int = Field(300, ge=60)           # How often offers, floor and sales are checked
+    min_profit_gap_pct: float = 40.0                     # Stop outbidding when the floor would be less than this
+                                                         # far above our offer (royalty included)
+    outbid_step_pct: float = Field(0.1, gt=0)            # Beat the best offer by this much (then rounded up)
+    repeat: bool = True                                  # After selling, place a new offer
+
 class BotConfig(BaseModel):
     general: GeneralConfig = Field(default_factory=GeneralConfig)
     discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
@@ -142,6 +152,7 @@ class BotConfig(BaseModel):
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     floor_history: FloorHistoryConfig = Field(default_factory=FloorHistoryConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
+    simulation: SimulationConfig = Field(default_factory=SimulationConfig)
     opensea_api_key: Optional[str] = None
 
 def overrides_path_for(config_path: str) -> str:

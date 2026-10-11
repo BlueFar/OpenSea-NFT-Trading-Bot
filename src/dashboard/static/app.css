@@ -435,3 +435,37 @@ h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
   .tbl.chains .sm { display: inline; }
   .tbl.chains .num-cell { padding-left: 8px; }
 }
+
+/* ---------- Simulation ---------- */
+.sim-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 14px; }
+.sim-card { padding: 16px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.sim-head { display: flex; gap: 12px; align-items: center; min-width: 0; }
+.sim-head .cand-name a { color: var(--fg); text-decoration: none; }
+.sim-head .cand-name a:hover { color: var(--accent); }
+.sim-head .pill { flex: none; }
+.sim-chart svg { display: block; width: 100%; height: 74px; overflow: visible; }
+.sim-chart path { fill: none; stroke-width: 1.6; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.sim-chart .l-floor { stroke: var(--muted); }
+.sim-chart .l-top { stroke: var(--warn); stroke-dasharray: 4 3; }
+.sim-chart .l-bid { stroke: var(--accent); stroke-width: 2.2; }
+.sim-chart .l-ask { stroke: var(--good); stroke-width: 2.2; }
+.sim-chart.empty-chart { font-size: 12.5px; color: var(--muted); padding: 10px 0; }
+.sim-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 6px; font-size: 11.5px; color: var(--muted); }
+.sim-legend span::before { content: ""; display: inline-block; width: 12px; height: 0; border-top: 2px solid; vertical-align: middle; margin-right: 5px; }
+.sim-legend .k-floor::before { border-color: var(--muted); }
+.sim-legend .k-top::before { border-color: var(--warn); border-top-style: dashed; }
+.sim-legend .k-bid::before { border-color: var(--accent); }
+.sim-legend .k-ask::before { border-color: var(--good); }
+.sim-note, .sim-last { margin: 0; font-size: 12.5px; line-height: 1.4; }
+.sim-btns { display: flex; gap: 6px; }
+.sim-btns .btn { padding: 5px 10px; font-size: 12.5px; }
+.sim-steps { margin: 0; padding-left: 20px; display: grid; gap: 6px; font-size: 13px; color: var(--muted); }
+.sim-steps strong { color: var(--fg); }
+.sim-feed { max-height: 520px; overflow-y: auto; }
+.sim-feed span strong { font-weight: 600; }
+.tbl.sim-trades th { text-align: right; font-size: 11.5px; font-weight: 500; color: var(--muted); padding: 0 0 6px 12px; white-space: nowrap; }
+.tbl.sim-trades th:first-child { text-align: left; padding-left: 0; }
+.tbl.sim-trades td { text-align: right; padding-left: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; font-weight: 400; }
+.tbl.sim-trades td:first-child { text-align: left; padding-left: 0; white-space: normal; }
+.tbl.sim-trades td:first-child a { color: var(--fg); font-weight: 600; text-decoration: none; }
+.tbl.sim-trades tbody tr:first-child td { border-top: 1px solid var(--line); }

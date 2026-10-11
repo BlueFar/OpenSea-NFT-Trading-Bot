@@ -16,6 +16,8 @@ from ..providers.opensea.provider import OpenSeaProvider
 from ..collectors.orchestrator import CollectionEvaluator
 from ..collectors.chain_volume import summarize as summarize_chain_volume
 from ..runtime import control, launchd
+from ..simulation.engine import describe_position
+from ..simulation.store import SimStore
 from ..runtime.control import BotProcessManager, PID_FILE, LOG_FILE, WORKSPACE_ROOT  # noqa: F401 (re-exported)
 from ..utils.logging import setup_logger
 from ..utils.net import use_ipv4_only
@@ -30,6 +32,7 @@ STATIC_FILES = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/static/app.css": ("app.css", "text/css; charset=utf-8"),
     "/static/app.js": ("app.js", "application/javascript; charset=utf-8"),
+    "/static/sim.js": ("sim.js", "application/javascript; charset=utf-8"),
 }
 
 # Rule key -> (config attribute holding the limit, or None for yes/no rules)
@@ -180,6 +183,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             "/api/logs": lambda: self._handle_get_logs(query),
             "/api/prices": lambda: self._handle_get_prices(),
             "/api/chains": lambda: self._handle_get_chains(),
+            "/api/simulation": lambda: self._handle_get_simulation(),
         }
         if path in routes:
             routes[path]()
@@ -197,6 +201,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             self._handle_stop_bot()
         elif path == "/api/settings":
             self._handle_save_settings()
+        elif path.startswith("/api/simulation/"):
+            self._handle_simulation_action(path.rsplit("/", 1)[-1])
         else:
             self._send_text("Not Found", status=404)
 
@@ -697,6 +703,100 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         self.config, self.evaluator = new_cfg, cls.evaluator
         self.state_store.log_event("settings", "Settings saved from the dashboard.")
         self._send_json({"success": True, "settings": self._settings_payload()})
+
+    # ------------------------------------------------------------------
+    # Simulation (paper trading; the bot does the checking)
+    # ------------------------------------------------------------------
+    def _sim_store(self) -> SimStore:
+        store = getattr(type(self), "sim_store", None)
+        if store is None or store.db_path != self.state_store.db_path:
+            store = type(self).sim_store = SimStore(self.state_store.db_path)
+        return store
+
+    def _sim_config(self) -> BotConfig:
+        try:
+            return load_config(self.config_path)
+        except Exception:
+            return self.config
+
+    def _handle_get_simulation(self):
+        import time
+        cfg = self._sim_config()
+        store = self._sim_store()
+        discount = cfg.trade_model.target_sale_discount_from_floor_pct
+        positions = [describe_position(p, discount) for p in store.get_positions()]
+        since = int(time.time()) - 3 * 86400
+        charts = {}
+        for p in positions:
+            ticks = store.get_ticks(p["slug"], since_ts=since)
+            step = max(1, len(ticks) // 150)  # at most ~150 points per chart
+            charts[p["slug"]] = [[t["ts"], t["bid"], t["competitor_top"], t["floor"], t["ask"]] for t in ticks[::step]]
+        names = {p["slug"]: p.get("name") or p["slug"] for p in store.get_positions(include_removed=True)}
+        trades = store.get_trades()
+        for t in trades:
+            t["name"] = names.get(t["slug"], t["slug"])
+            t["hold_seconds"] = (t["exit_at"] or 0) - (t["entry_at"] or 0)
+        events = store.get_events(80)
+        for e in events:
+            e["name"] = names.get(e["slug"], e["slug"])
+        summary = self.state_store.get_status_summary()
+        sim = cfg.simulation
+        self._send_json({
+            "enabled": sim.enabled,
+            "interval_seconds": sim.interval_seconds,
+            "min_profit_gap_pct": sim.min_profit_gap_pct,
+            "outbid_step_pct": sim.outbid_step_pct,
+            "repeat": sim.repeat,
+            "exit_discount_pct": discount,
+            "bot": self._run_state(summary)["state"],
+            "positions": positions,
+            "charts": charts,
+            "trades": trades,
+            "events": events,
+        })
+
+    def _handle_simulation_action(self, action: str):
+        if action not in ("add", "stop", "start", "remove"):
+            self._send_json({"error": "Unknown action"}, status=404)
+            return
+        body = self._read_json_body()
+        slug = str(body.get("slug") or "").strip()
+        if "opensea.io/collection/" in slug:
+            slug = slug.split("opensea.io/collection/")[-1]
+        slug = slug.split("?")[0].split("#")[0].strip("/ ").lower()
+        if not slug:
+            self._send_json({"error": "Enter an OpenSea collection link or name."}, status=400)
+            return
+        store = self._sim_store()
+        if action == "add":
+            existing = store.get_position(slug)
+            if existing and existing["status"] != "removed":
+                self._send_json({"error": "That collection is already in the simulation."}, status=409)
+                return
+            provider = getattr(self.evaluator, "provider", None)
+            client = getattr(provider, "client", None)
+            if client is not None and hasattr(client, "set_api_key"):
+                key = reload_env()  # the current key from .env, even if it changed after the dashboard started
+                if key and key != client.api_key:
+                    client.set_api_key(key)
+            try:
+                coll = provider.get_collection(slug) if provider is not None else None
+            except OpenSeaNetworkError:
+                self._send_json({"error": "Couldn't reach OpenSea. Try again in a minute."}, status=503)
+                return
+            except Exception as e:
+                self._send_json({"error": f"Couldn't check that collection: {e}"}, status=502)
+                return
+            if coll is None:
+                self._send_json({"error": f"Couldn't find '{slug}' on OpenSea."}, status=404)
+                return
+            store.add_position(slug)
+            self._send_json({"success": True, "position": store.get_position(slug)})
+            return
+        if store.get_position(slug) is None:
+            self._send_json({"error": "That collection isn't in the simulation."}, status=404)
+            return
+        self._send_json({"success": True, "position": store.set_status(slug, action)})
 
     # ------------------------------------------------------------------
     # Logs
