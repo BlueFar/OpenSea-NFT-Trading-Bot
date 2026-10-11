@@ -347,6 +347,34 @@ class StateStore:
             """, (1 if is_pass else 0, None if is_pass else reject_filter, reason, now, slug))
             conn.commit()
 
+    def get_info_paths(self, slug: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Info.md files the bot wrote for passing days: [{"slug", "date_str", "path"}], oldest first."""
+        q = "SELECT slug, date_str, details FROM candidate_history WHERE is_pass=1"
+        args: tuple = ()
+        if slug is not None:
+            q += " AND slug=?"
+            args = (slug,)
+        out = []
+        with self._get_connection() as conn:
+            for s_, d, det in conn.execute(q + " ORDER BY date_str", args).fetchall():
+                try:
+                    path = (json.loads(det) or {}).get("info_md") if det else None
+                except (TypeError, ValueError):
+                    path = None
+                if path:
+                    out.append({"slug": s_, "date_str": d, "path": path})
+        return out
+
+    def get_stopped_passing(self) -> List[Dict[str, Any]]:
+        """Collections with a passing day whose latest check failed: [{"slug", "reason", "rule"}]."""
+        with self._get_connection() as conn:
+            rows = conn.execute("""
+                SELECT m.slug, m.last_result_reason, m.last_result_rule FROM monitored_collections m
+                WHERE m.last_result_pass = 0
+                  AND EXISTS (SELECT 1 FROM candidate_history h WHERE h.slug = m.slug AND h.is_pass = 1)
+            """).fetchall()
+        return [{"slug": r[0], "reason": r[1], "rule": r[2]} for r in rows]
+
     def set_last_result_pass(self, slug: str):
         """A check passed again on a day that already has a pass recorded (nothing else is written)."""
         with self._get_connection() as conn:

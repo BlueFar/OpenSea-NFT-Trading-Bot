@@ -29,6 +29,7 @@ class GeneralConfig(BaseModel):
     data_root: str = "./data"
     state_db_path: str = "./state/bot.db"
     log_level: str = "INFO"
+    remove_stopped_candidates: bool = True  # Move a candidate's Info.md folders out (to the Trash) when it stops passing
 
 class DiscoveryConfig(BaseModel):
     primary_source: str = "collections"

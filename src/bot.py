@@ -24,6 +24,7 @@ from .discovery.engine import DiscoveryEngine
 from .collectors.orchestrator import CollectionEvaluator
 from .collectors.chain_volume import refresh_chain_volume
 from .config.chains import CHAINS
+from .storage.candidate_files import is_data_problem, purge_removed, remove_info_folders
 from .utils.logging import setup_logger
 from .utils.time import now_local
 from datetime import timedelta
@@ -121,6 +122,27 @@ class NFTBot:
         logger.info("Settings changed. Using the new settings from the next check.")
         self.state_store.log_event("settings", "New settings are in use.")
 
+    def sweep_stopped_candidates(self) -> int:
+        """
+        Moves out the Info.md folders of every candidate whose latest check failed a rule (on start, so folders
+        left from before this feature, or from a stop mid-check, are cleared too). Returns folders moved.
+        """
+        if not self.config.general.remove_stopped_candidates:
+            return 0
+        data_root = self.config.general.data_root
+        moved = 0
+        for row in self.state_store.get_stopped_passing():
+            if is_data_problem(row.get("reason")):
+                continue
+            paths = [r["path"] for r in self.state_store.get_info_paths(row["slug"])]
+            moved += len(remove_info_folders(paths, data_root, self.evaluator.trash))
+        purge_removed(data_root)
+        if moved:
+            where = "the Trash" if self.evaluator.trash else "data/_removed (deleted after 7 days)"
+            logger.info("Moved %d Info.md folder(s) of candidates that stopped passing to %s.", moved, where)
+            self.state_store.log_event("cleanup", f"Moved {moved} Info.md folders of candidates that stopped passing to {where}.")
+        return moved
+
     def _last_chain_volume_time(self) -> float:
         """When the chain table was last refreshed, so a restart after a power cut doesn't redo it at once."""
         try:
@@ -180,6 +202,12 @@ class NFTBot:
         self.state_store.update_telemetry("started_at", time.time())
         control.write_pid_file(os.getpid())
         self.state_store.log_event("start", "Bot started" + (" (dry run: no Info.md files)." if dry_run else "."))
+
+        if not dry_run:
+            try:
+                self.sweep_stopped_candidates()
+            except Exception as e:
+                logger.error("Could not clear folders of candidates that stopped passing: %s", e)
 
         last_discovery_time = 0.0
         last_evaluation_time = 0.0
