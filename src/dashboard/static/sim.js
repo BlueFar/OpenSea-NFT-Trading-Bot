@@ -91,6 +91,9 @@
         '<div><dt title="If it fills and sells ' + fmt(data.exit_discount_pct, 0) + '% under today\'s floor">Profit if it fills</dt><dd>' + profitHtml(p.est_net, p.est_roi_pct, cur) + "</dd></div>";
     }
     var meta = [N.chainName(p.chain)];
+    if ((data.final || []).indexOf(p.slug) >= 0) meta.push("Final list");
+    else if (p.source === "candidate") meta.push("Candidate");
+    if (p.auto_stopped) meta.push("stopped: no longer passes the checks");
     if ((p.round || 1) > 1) meta.push("round " + p.round);
     if (p.times_outbid) meta.push("outbid " + p.times_outbid + (p.times_outbid === 1 ? " time" : " times"));
     var btns = (p.status === "stopped"
@@ -154,7 +157,12 @@
       '<div class="card stat"><span class="stat-label">Profit so far</span><span class="stat-value num ' + (isNum(all.usd) && all.usd < 0 ? "c-bad" : all.any ? "c-good" : "") + '">' + esc(all.text) + '</span><span class="stat-sub">' + esc(profitSub) + "</span></div>";
 
     // Rules in plain words, from the current settings
-    $("simRules").innerHTML = '<div class="section-title"><h2>How it plays</h2><span>Checks every ' + fmt(d.interval_seconds / 60, 0) + " minutes</span></div>" +
+    if ($("simRules").contains(document.activeElement)) return renderRest();
+    var scope = d.include_candidates ? "every collection on the Candidates page, the Final list and the ones added here" : "the collections below";
+    $("simRules").innerHTML = '<div class="section-title"><h2>How it plays</h2><form class="sim-every" id="simEvery"><label for="simEveryIn">Check every</label> ' +
+      '<input id="simEveryIn" type="number" min="1" max="1440" step="1" value="' + fmt(d.interval_seconds / 60, 0).replace(/,/g, "") + '"> minutes ' +
+      '<button class="btn ghost" type="submit">Save</button></form></div>' +
+      '<p class="chart-note" style="margin:0 0 10px">Simulating ' + scope + ". Checking more often answers outbids sooner but slows the candidate scan, which shares the same OpenSea allowance.</p>" +
       '<ol class="sim-steps">' +
       "<li><strong>Bid.</strong> One offer per collection, " + fmt(d.outbid_step_pct, 1) + "% above the best real offer, so it's the best offer at the smallest price. It follows other bidders up and down.</li>" +
       "<li><strong>Stop at the limit.</strong> We never offer so much that the floor is less than " + fmt(d.min_profit_gap_pct, 0) + "% above our offer (royalty included). If someone bids higher, we stay at that limit.</li>" +
@@ -162,6 +170,11 @@
       "<li><strong>Sell.</strong> We list it " + fmt(d.exit_discount_pct, 0) + "% under the floor and count it sold when a real buyer pays that or more for a floor item." +
       (d.repeat ? " Then we bid again." : "") + "</li>" +
       "<li><strong>If the floor falls.</strong> We never list below break-even, so the item waits until the floor recovers. Profit so far counts it as if sold under today's floor, so a loss still shows.</li></ol>";
+    renderRest();
+  }
+
+  function renderRest() {
+    var d = data, pos = d.positions || [], trades = d.trades || [], events = d.events || [];
 
     // Cards
     $("simGrid").innerHTML = pos.length ? pos.map(function (p) { return card(p, p.last_event); }).join("") :
@@ -212,6 +225,64 @@
     }, function (err) { N.toast(err.message || "Couldn't add it."); }).then(function () { btn.disabled = false; });
   });
 
-  window.SimPage = { load: load };
+  $("page-sim").addEventListener("submit", function (e) {
+    if (e.target.id !== "simEvery") return;
+    e.preventDefault();
+    var v = parseFloat($("simEveryIn").value);
+    N.post("/api/simulation/settings", { interval_minutes: v }).then(function () {
+      N.toast("Saved. The bot checks every " + fmt(v, 0) + " minutes from its next round."); document.activeElement.blur(); load();
+    }, function (err) { N.toast(err.message || "Couldn't save."); });
+  });
+
+  // ---------- Final list ----------
+  var finBusy = false;
+  function finRow(f) {
+    var cur = f.currency || "", held = f.entry_price != null;
+    var total = (isNum(f.realised_net) ? f.realised_net : 0) + (held && isNum(f.now_net) ? f.now_net : 0);
+    var hasTotal = isNum(f.realised_net) || (held && isNum(f.now_net));
+    var profitSub = [];
+    if (f.trades) profitSub.push(f.trades + (f.trades === 1 ? " sale" : " sales") + (isNum(f.realised_net) ? " " + (f.realised_net >= 0 ? "+" : "−") + N.moneyText(Math.abs(f.realised_net), cur) : ""));
+    if (held) profitSub.push("1 held, " + (isNum(f.now_net) ? (f.now_net >= 0 ? "+" : "−") + N.moneyText(Math.abs(f.now_net), cur) : "–") + " at today's floor");
+    if (!hasTotal && isNum(f.est_net)) profitSub.push("if it fills: " + (f.est_net >= 0 ? "+" : "−") + N.moneyText(Math.abs(f.est_net), cur) + " (" + fmt(f.est_roi_pct, 0) + "%)");
+    var stateLine = !f.status ? "Not in the simulation yet" : held ? "Bought for " + N.moneyText(f.entry_price, cur) + (isNum(f.ask) ? ", listed at " + N.moneyText(f.ask, cur) : "") :
+      isNum(f.bid) ? "Our offer " + N.moneyText(f.bid, cur) + (isNum(f.competitor_top) ? " · best other " + N.moneyText(f.competitor_top, cur) : "") + (isNum(f.floor) ? " · floor " + N.moneyText(f.floor, cur) : "") : "Waiting for the first check";
+    return '<div class="fin-row">' + N.art(f.slug, f.image) +
+      '<div class="fin-main"><div class="cand-name"><span>' + osLink(f.slug, f.name || f.slug) + "</span></div>" +
+      '<div class="cand-meta">' + esc([N.chainName(f.chain), f.added_by === "claude" ? "added by Claude" : "added by you"].filter(Boolean).join(" · ")) + "</div>" +
+      (f.note ? '<p class="fin-note">' + esc(f.note) + "</p>" : "") +
+      '<p class="fin-state">' + esc(stateLine) + "</p>" +
+      (f.last_event ? '<p class="sim-last"><span class="muted">' + esc(N.ago(f.last_event.ts)) + ":</span> " + esc(f.last_event.message) + "</p>" : "") + "</div>" +
+      '<div class="fin-side">' + (f.status ? statusPill(f) : '<span class="pill neutral">Not simulated</span>') +
+      '<div class="fin-profit"><span class="muted">Simulation profit</span><strong>' + (hasTotal ? profitHtml(total, null, cur) : "–") + "</strong>" +
+      '<span class="fin-sub">' + esc(profitSub.join(" · ") || "no fills yet") + "</span></div>" +
+      '<button class="btn ghost" type="button" data-fin-remove="' + esc(f.slug) + '" data-name="' + esc(f.name || f.slug) + '">Remove</button></div></div>';
+  }
+  function loadFinal() {
+    if (finBusy) return;
+    finBusy = true;
+    N.api("/api/final").then(function (r) {
+      $("finList").innerHTML = r.items.length ? r.items.map(finRow).join("") :
+        '<div class="empty"><h3>Nothing on the Final list</h3>Add a collection below, or ask Claude to check one.</div>';
+    }, function (e) { $("finList").innerHTML = '<div class="empty">' + esc(e.message || "Couldn't load the Final list.") + "</div>"; })
+      .then(function () { finBusy = false; });
+  }
+  $("finList").addEventListener("click", function (e) {
+    var b = e.target.closest("button[data-fin-remove]"); if (!b) return;
+    if (!window.confirm("Take " + b.getAttribute("data-name") + " off the Final list? It stays in the simulation.")) return;
+    b.disabled = true;
+    N.post("/api/final/remove", { slug: b.getAttribute("data-fin-remove") }).then(function () { N.toast("Removed from the Final list."); loadFinal(); },
+      function (err) { N.toast(err.message || "Couldn't remove it."); b.disabled = false; });
+  });
+  $("finAddForm").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var input = $("finAddInput"), note = $("finAddNote"), v = input.value.trim(); if (!v) return;
+    var btn = this.querySelector("button"); btn.disabled = true;
+    N.post("/api/final/add", { slug: v, note: note.value.trim() }).then(function () {
+      input.value = ""; note.value = ""; N.toast("Added to the Final list and the simulation."); loadFinal();
+    }, function (err) { N.toast(err.message || "Couldn't add it."); }).then(function () { btn.disabled = false; });
+  });
+
+  window.SimPage = { load: load, loadFinal: loadFinal };
+  if ((location.hash || "").slice(1) === "final") loadFinal();
   if ((location.hash || "").slice(1) === "sim") load();
 })();

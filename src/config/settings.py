@@ -138,7 +138,9 @@ class SimulationConfig(BaseModel):
     """Paper trading: hold the best offer on these collections and sell what fills just under the floor."""
     enabled: bool = True
     collections: List[str] = Field(default_factory=list)  # OpenSea collection slugs
-    interval_seconds: int = Field(300, ge=60)           # How often offers, floor and sales are checked
+    interval_seconds: int = Field(900, ge=60)           # How often offers, floor and sales are checked
+    include_candidates: bool = True                      # Also simulate every collection on the Candidates page
+    final_list: Dict[str, str] = Field(default_factory=dict)  # Final list to start with: slug -> why it passed
     min_profit_gap_pct: float = 40.0                     # Stop outbidding when the floor would be less than this
                                                          # far above our offer (royalty included)
     outbid_step_pct: float = Field(0.1, gt=0)            # Beat the best offer by this much (then rounded up)

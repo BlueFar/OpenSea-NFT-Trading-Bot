@@ -187,6 +187,7 @@
     if (page === "near") loadNear();
     if (page === "settings" && !isDirty()) loadSettings();
     if (page === "sim" && window.SimPage) window.SimPage.load();
+    if (page === "final" && window.SimPage) window.SimPage.loadFinal();
   }
   document.querySelectorAll(".nav button").forEach(function (b) { b.addEventListener("click", function () { go(b.getAttribute("data-page")); }); });
 
@@ -1047,6 +1048,7 @@
     if (page === "candidates") loadCandidates();
     if (page === "near") loadNear();
     if (page === "sim" && window.SimPage) window.SimPage.load();
+    if (page === "final" && window.SimPage) window.SimPage.loadFinal();
   }
   // Shared with sim.js (the Simulation page)
   window.NFTM = { api: api, post: post, esc: esc, isNum: isNum, fmt: fmt, int: int, money: money, moneyText: moneyText,

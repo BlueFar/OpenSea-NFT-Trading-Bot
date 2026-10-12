@@ -224,11 +224,36 @@ class PaperTrader:
         return self.config.simulation
 
     def seed(self) -> None:
-        """Collections listed in the settings file start once; removing one on the dashboard sticks."""
-        for slug in self.sim.collections or []:
+        """
+        Which collections to simulate: the settings file's list, the Final list and (include_candidates) every
+        collection on the Candidates page. Each starts once; removing one on the dashboard sticks. A candidate
+        that stops passing stops bidding (an item already bought is still sold), and restarts if it passes again.
+        """
+        if self.sim.final_list:
+            self.store.seed_final(self.sim.final_list)
+        keep = set()
+        for slug, source, note in (
+            [(s, "config", "Added from the settings file.") for s in self.sim.collections or []]
+            + [(f["slug"], "final", "Added from the Final list.") for f in self.store.get_final_list()]
+        ):
             slug = (slug or "").strip()
+            keep.add(slug)
             if slug and self.store.get_position(slug) is None:
-                self.store.add_position(slug, note="Added from the settings file. The first offer goes in at the next check.")
+                self.store.add_position(slug, note=note + " The first offer goes in at the next check.", source=source)
+        if not self.sim.include_candidates:
+            return
+        passing = set(self.store.passing_candidates())
+        for slug in sorted(passing):
+            pos = self.store.get_position(slug)
+            if pos is None:
+                self.store.add_position(slug, note="New candidate. The first offer goes in at the next check.",
+                                        source="candidate")
+            elif pos["status"] == "stopped" and pos.get("auto_stopped"):
+                self.store.auto_stop(slug, False, "Passing the bot's rules again: bidding again.")
+        for pos in self.store.get_positions():
+            if (pos.get("source") == "candidate" and pos["status"] == "bidding" and pos["slug"] not in passing
+                    and pos["slug"] not in keep):
+                self.store.auto_stop(pos["slug"], True, "No longer passes the bot's rules: stopped bidding.")
 
     def tick(self, now: Optional[int] = None, keep_running: Callable[[], bool] = lambda: True) -> int:
         """One check of every active position. OpenSeaNetworkError is passed up (the bot pauses)."""

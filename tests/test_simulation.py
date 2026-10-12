@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import time
 from unittest.mock import MagicMock, patch
 
@@ -114,6 +115,8 @@ def _trader(tmp_path, market, **sim):
     cfg = load_config("config/config.yaml")
     cfg.general.state_db_path = str(tmp_path / "bot.db")
     cfg.simulation.collections = ["kongz"]
+    cfg.simulation.final_list = {}
+    cfg.simulation.include_candidates = False
     for k, v in sim.items():
         setattr(cfg.simulation, k, v)
     state = StateStore(cfg.general.state_db_path)
@@ -502,3 +505,88 @@ def test_removing_a_held_item_keeps_it_in_the_results(tmp_path):
     trader.store.add_position("kongz")
     p = trader.store.get_position("kongz")
     assert p["status"] == "bidding" and p["entry_price"] is None
+
+
+def _passing(state, slug, passes=True):
+    with sqlite3.connect(state.db_path) as conn:
+        conn.execute("INSERT OR IGNORE INTO monitored_collections (slug, discovery_source) VALUES (?, 'test')", (slug,))
+        conn.execute("UPDATE monitored_collections SET last_result_pass=? WHERE slug=?", (1 if passes else 0, slug))
+
+
+def test_candidates_join_and_leave_the_simulation_with_the_bots_checks(tmp_path):
+    m = FakeMarket()
+    t, state = _trader(tmp_path, m, collections=[], include_candidates=True)
+    _passing(state, "alpha")
+    _passing(state, "beta")
+    t.seed()
+    assert {p["slug"]: p["source"] for p in t.store.get_positions()} == {"alpha": "candidate", "beta": "candidate"}
+
+    _passing(state, "beta", passes=False)
+    t.seed()
+    beta = t.store.get_position("beta")
+    assert beta["status"] == "stopped" and beta["auto_stopped"]
+    assert t.store.get_position("alpha")["status"] == "bidding"
+
+    _passing(state, "beta")
+    t.seed()
+    assert t.store.get_position("beta")["status"] == "bidding"
+
+    # Stopped by hand: stays stopped even though it still passes
+    t.store.set_status("alpha", "stop")
+    t.seed()
+    assert t.store.get_position("alpha")["status"] == "stopped"
+    # Removed by hand: not added back
+    t.store.set_status("beta", "remove")
+    t.seed()
+    assert t.store.get_position("beta")["status"] == "removed"
+
+
+def test_final_list_is_seeded_once_and_feeds_the_simulation(tmp_path):
+    m = FakeMarket()
+    t, state = _trader(tmp_path, m, collections=[], final_list={"Smol-Brains": "Strong holders"})
+    t.seed()
+    [f] = t.store.get_final_list()
+    assert f["slug"] == "smol-brains" and f["added_by"] == "claude" and f["note"] == "Strong holders"
+    assert t.store.get_position("smol-brains")["source"] == "final"
+
+    # A Final list pick that stops passing the bot's checks keeps bidding
+    t.sim.include_candidates = True
+    _passing(state, "smol-brains", passes=False)
+    t.seed()
+    assert t.store.get_position("smol-brains")["status"] == "bidding"
+
+    t.store.remove_final("smol-brains")
+    t.seed()
+    assert t.store.get_final_list() == []
+
+
+def test_dashboard_final_list_and_interval(tmp_path):
+    from src.dashboard.server import DashboardRequestHandler
+    env = _dash_env(tmp_path)
+    cfg_path, cfg, store, ev = env
+    DashboardRequestHandler.sim_store = None
+    with patch.object(DashboardRequestHandler, "config", cfg, create=True), \
+         patch.object(DashboardRequestHandler, "evaluator", ev, create=True):
+        assert _call("POST", "/api/final/add", env, {"slug": ""})[0] == 400
+        status, r = _call("POST", "/api/final/add", env, {"slug": "https://opensea.io/collection/Smol-Brains", "note": "my pick"})
+        assert status == 200
+        assert _call("POST", "/api/final/add", env, {"slug": "smol-brains"})[0] == 409
+
+        sim = SimStore(cfg.general.state_db_path)
+        assert sim.get_position("smol-brains")["source"] == "final"
+        status, r = _call("GET", "/api/final", env)
+        [item] = r["items"]
+        assert status == 200 and item["slug"] == "smol-brains" and item["added_by"] == "you" and item["note"] == "my pick"
+        assert item["status"] == "bidding" and item["trades"] == 0 and item["realised_net"] is None
+        assert _call("GET", "/api/simulation", env)[1]["final"] == ["smol-brains"]
+
+        assert _call("POST", "/api/final/remove", env, {"slug": "smol-brains"})[0] == 200
+        assert _call("GET", "/api/final", env)[1]["items"] == []
+        assert sim.get_position("smol-brains")["status"] == "bidding"  # still simulated
+        assert _call("POST", "/api/final/remove", env, {"slug": "smol-brains"})[0] == 404
+
+        assert _call("POST", "/api/simulation/settings", env, {"interval_minutes": 0})[0] == 400
+        assert _call("POST", "/api/simulation/settings", env, {"interval_minutes": "x"})[0] == 400
+        status, r = _call("POST", "/api/simulation/settings", env, {"interval_minutes": 5})
+        assert status == 200 and r["interval_seconds"] == 300
+        assert load_config(str(cfg_path)).simulation.interval_seconds == 300

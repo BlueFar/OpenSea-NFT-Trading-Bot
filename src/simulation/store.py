@@ -11,6 +11,7 @@ POSITION_COLUMNS = (
     "fee_pct", "royalty_pct", "gas",
     "entry_price", "entry_at", "entry_tx", "entry_token", "ask", "listed_at",
     "round_started_at", "last_tick_at", "last_sale_check", "note", "created_at", "updated_at",
+    "source", "auto_stopped",
 )
 
 
@@ -46,7 +47,8 @@ class SimStore:
                     entry_price REAL, entry_at INTEGER, entry_tx TEXT, entry_token TEXT,
                     ask REAL, listed_at INTEGER,
                     round_started_at INTEGER, last_tick_at INTEGER, last_sale_check INTEGER,
-                    note TEXT, created_at INTEGER, updated_at INTEGER
+                    note TEXT, created_at INTEGER, updated_at INTEGER,
+                    source TEXT, auto_stopped INTEGER DEFAULT 0
                 )
             """)
             # What the market and our offer or listing looked like at each check
@@ -82,7 +84,69 @@ class SimStore:
                     PRIMARY KEY (slug, event_id)
                 )
             """)
+            # Collections that passed the fundamentals check (Final list page)
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS final_list (
+                    slug TEXT PRIMARY KEY, added_at INTEGER, added_by TEXT, note TEXT
+                )
+            """)
+            c.execute("CREATE TABLE IF NOT EXISTS sim_meta (key TEXT PRIMARY KEY, value TEXT)")
             conn.commit()
+
+    # ------------------------------------------------------------------
+    # Final list and candidates
+    # ------------------------------------------------------------------
+    def get_final_list(self) -> List[Dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute("SELECT slug, added_at, added_by, note FROM final_list ORDER BY added_at, slug").fetchall()
+        return [dict(zip(("slug", "added_at", "added_by", "note"), r)) for r in rows]
+
+    def add_final(self, slug: str, added_by: str = "you", note: str = "") -> bool:
+        with self._conn() as conn:
+            cur = conn.execute("INSERT OR IGNORE INTO final_list (slug, added_at, added_by, note) VALUES (?, ?, ?, ?)",
+                               (slug, int(time.time()), added_by, note or ""))
+            conn.commit()
+            return cur.rowcount == 1
+
+    def seed_final(self, picks: Dict[str, str]) -> None:
+        """Fills the Final list once from the settings file; later removals on the dashboard stick."""
+        with self._conn() as conn:
+            if conn.execute("SELECT 1 FROM sim_meta WHERE key='final_seeded'").fetchone():
+                return
+            now = int(time.time())
+            for slug, note in picks.items():
+                conn.execute("INSERT OR IGNORE INTO final_list (slug, added_at, added_by, note) VALUES (?, ?, 'claude', ?)",
+                             (slug.strip().lower(), now, note or ""))
+            conn.execute("INSERT INTO sim_meta (key, value) VALUES ('final_seeded', ?)", (str(now),))
+            conn.commit()
+
+    def remove_final(self, slug: str) -> bool:
+        with self._conn() as conn:
+            cur = conn.execute("DELETE FROM final_list WHERE slug=?", (slug,))
+            conn.commit()
+            return cur.rowcount == 1
+
+    def passing_candidates(self) -> List[str]:
+        """Collections whose latest bot check passed every rule (the Candidates page)."""
+        try:
+            with self._conn() as conn:
+                return [r[0] for r in conn.execute(
+                    "SELECT slug FROM monitored_collections WHERE last_result_pass=1 ORDER BY slug")]
+        except sqlite3.OperationalError:  # the bot hasn't created its tables yet
+            return []
+
+    def auto_stop(self, slug: str, stop: bool, note: str) -> None:
+        """Stops bidding on a collection that left the candidate list, or restarts it when it's back."""
+        pos = self.get_position(slug)
+        if pos is None:
+            return
+        if stop:
+            self.set_status(slug, "stop", note=note)
+            with self._conn() as conn:
+                conn.execute("UPDATE sim_positions SET auto_stopped=1 WHERE slug=?", (slug,))
+                conn.commit()
+        else:
+            self.set_status(slug, "start", note=note)
 
     # ------------------------------------------------------------------
     # Positions
@@ -103,7 +167,8 @@ class SimStore:
             r = conn.execute(f"SELECT {', '.join(POSITION_COLUMNS)} FROM sim_positions WHERE slug=?", (slug,)).fetchone()
         return self._row(r) if r else None
 
-    def add_position(self, slug: str, note: str = "Added. The first offer goes in at the next check.") -> bool:
+    def add_position(self, slug: str, note: str = "Added. The first offer goes in at the next check.",
+                     source: str = "manual") -> bool:
         """Starts simulating a collection. False if it is already there (a removed one is brought back)."""
         existing = self.get_position(slug)
         if existing is not None:
@@ -114,14 +179,14 @@ class SimStore:
         now = int(time.time())
         with self._conn() as conn:
             conn.execute("INSERT INTO sim_positions (slug, name, status, round, rev, times_outbid, note, "
-                         "created_at, updated_at) VALUES (?, ?, 'bidding', 1, 0, 0, ?, ?, ?)",
-                         (slug, slug, note, now, now))
+                         "created_at, updated_at, source, auto_stopped) VALUES (?, ?, 'bidding', 1, 0, 0, ?, ?, ?, ?, 0)",
+                         (slug, slug, note, now, now, source))
             conn.execute("INSERT INTO sim_events (ts, slug, kind, message) VALUES (?, ?, 'added', ?)", (now, slug, note))
             conn.commit()
         return True
 
-    def set_status(self, slug: str, action: str,
-                   closing_trade: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    def set_status(self, slug: str, action: str, closing_trade: Optional[Dict[str, Any]] = None,
+                   note: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Dashboard buttons: stop, start or remove. Start resumes the listing if an item was bought.
         closing_trade: on remove, the bought item valued at today's floor, so it stays in the results.
@@ -131,18 +196,19 @@ class SimStore:
             return None
         now = int(time.time())
         if action == "stop":
-            status, note = "stopped", "Stopped from the dashboard."
+            status, msg = "stopped", "Stopped from the dashboard."
         elif action == "remove":
-            status, note = "removed", "Removed from the dashboard."
+            status, msg = "removed", "Removed from the dashboard."
         elif action == "start":
             if pos["entry_price"] is not None:
-                status, note = "holding", "Started again: still holding the item bought."
+                status, msg = "holding", "Started again: still holding the item bought."
             else:
-                status, note = "bidding", "Started again: placing a new offer at the next check."
+                status, msg = "bidding", "Started again: placing a new offer at the next check."
         else:
             raise ValueError(f"Unknown action {action}")
         with self._conn() as conn:
-            fields = {"status": status, "note": note, "updated_at": now}
+            note = note or msg
+            fields = {"status": status, "note": None, "updated_at": now, "auto_stopped": 0}
             if action == "start" and status == "bidding":
                 # A fresh offer: sales from while it was stopped don't count
                 fields.update({"bid": None, "bid_state": None, "round_started_at": None, "last_sale_check": None})

@@ -35,6 +35,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5"/><path d="M4 19h16"/><path d="M7 15l3-4 3 2 5-6"/><circle cx="18" cy="7" r="1.6"/></svg>
         Simulation
       </button>
+      <button data-page="final">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/></svg>
+        Final list
+      </button>
       <button data-page="check">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
         Check a collection
@@ -159,6 +163,24 @@
           <ul class="feed sim-feed" id="simFeed"></ul>
         </div>
       </div>
+    </section>
+
+    <!-- FINAL LIST -->
+    <section class="page" id="page-final" aria-labelledby="h-final">
+      <div class="page-head">
+        <div>
+          <h1 id="h-final">Final list</h1>
+          <p>Collections that passed the fundamentals check: a use case, an active team and community, and still building. Each one is in the simulation, and its results show here.</p>
+        </div>
+      </div>
+      <div class="fin-list" id="finList"><div class="loading">Loading…</div></div>
+      <form class="card search fin-add" id="finAddForm" autocomplete="off">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        <input id="finAddInput" type="text" placeholder="Add a collection: OpenSea link or collection name" aria-label="OpenSea link or collection name to add">
+        <input id="finAddNote" type="text" placeholder="Why (optional)" aria-label="Why it passed (optional)" class="fin-note-in">
+        <button class="btn primary" type="submit">Add</button>
+      </form>
+      <p class="chart-note" style="margin:0">Ask Claude in the project chat to check a collection's fundamentals and add it here.</p>
     </section>
 
     <!-- CHECK -->

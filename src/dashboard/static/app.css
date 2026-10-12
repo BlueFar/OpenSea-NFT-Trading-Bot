@@ -469,3 +469,27 @@ h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
 .tbl.sim-trades td:first-child { text-align: left; padding-left: 0; white-space: normal; }
 .tbl.sim-trades td:first-child a { color: var(--fg); font-weight: 600; text-decoration: none; }
 .tbl.sim-trades tbody tr:first-child td { border-top: 1px solid var(--line); }
+
+/* Final list */
+.fin-list { display: grid; gap: 10px; }
+.fin-row { display: grid; grid-template-columns: auto 1fr auto; gap: 14px; align-items: start; padding: 14px 16px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+.fin-main { min-width: 0; }
+.fin-main .cand-name a { color: var(--fg); text-decoration: none; }
+.fin-main .cand-name a:hover { color: var(--accent); }
+.fin-note, .fin-state { margin: 4px 0 0; font-size: 13px; line-height: 1.4; }
+.fin-state { color: var(--muted); }
+.fin-side { display: grid; gap: 8px; justify-items: end; text-align: right; min-width: 170px; }
+.fin-profit { display: grid; gap: 2px; }
+.fin-profit .muted { font-size: 12px; }
+.fin-profit strong { font-size: 18px; }
+.fin-sub { font-size: 12px; color: var(--muted); max-width: 240px; }
+.fin-add { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.fin-add input { flex: 1 1 220px; }
+.fin-note-in { flex: 2 1 280px; }
+.sim-every { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.sim-every input { width: 72px; }
+@media (max-width: 640px) {
+  .fin-row { grid-template-columns: auto 1fr; }
+  .fin-side { grid-column: 1 / -1; justify-items: start; text-align: left; }
+}

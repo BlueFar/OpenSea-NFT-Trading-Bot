@@ -184,6 +184,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             "/api/prices": lambda: self._handle_get_prices(),
             "/api/chains": lambda: self._handle_get_chains(),
             "/api/simulation": lambda: self._handle_get_simulation(),
+            "/api/final": lambda: self._handle_get_final(),
         }
         if path in routes:
             routes[path]()
@@ -201,8 +202,12 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             self._handle_stop_bot()
         elif path == "/api/settings":
             self._handle_save_settings()
+        elif path == "/api/simulation/settings":
+            self._handle_simulation_settings()
         elif path.startswith("/api/simulation/"):
             self._handle_simulation_action(path.rsplit("/", 1)[-1])
+        elif path.startswith("/api/final/"):
+            self._handle_final_action(path.rsplit("/", 1)[-1])
         else:
             self._send_text("Not Found", status=404)
 
@@ -744,6 +749,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         sim = cfg.simulation
         self._send_json({
             "enabled": sim.enabled,
+            "include_candidates": sim.include_candidates,
+            "final": [f["slug"] for f in store.get_final_list()],
             "interval_seconds": sim.interval_seconds,
             "min_profit_gap_pct": sim.min_profit_gap_pct,
             "outbid_step_pct": sim.outbid_step_pct,
@@ -756,15 +763,120 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             "events": events,
         })
 
+    def _handle_simulation_settings(self):
+        """How often the simulation checks, saved to overrides.yaml (the bot picks it up without a restart)."""
+        body = self._read_json_body()
+        try:
+            minutes = float(body.get("interval_minutes"))
+        except (TypeError, ValueError):
+            minutes = 0
+        if not 1 <= minutes <= 1440:
+            self._send_json({"error": "Pick between 1 and 1440 minutes."}, status=400)
+            return
+        path = overrides_path_for(self.config_path)
+        current: Dict[str, Any] = {}
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                current = yaml.safe_load(f) or {}
+        current.setdefault("simulation", {})["interval_seconds"] = int(round(minutes * 60))
+        header = "# Saved by the dashboard's Settings page. Values here override config.yaml.\n"
+        control.atomic_write(path, header + yaml.safe_dump(current, sort_keys=True))
+        self.state_store.log_event("settings", f"Simulation now checks every {minutes:g} minutes.")
+        self._send_json({"success": True, "interval_seconds": int(round(minutes * 60))})
+
+    @staticmethod
+    def _slug_from(raw: Any) -> str:
+        slug = str(raw or "").strip()
+        if "opensea.io/collection/" in slug:
+            slug = slug.split("opensea.io/collection/")[-1]
+        return slug.split("?")[0].split("#")[0].strip("/ ").lower()
+
+    def _handle_get_final(self):
+        cfg = self._sim_config()
+        store = self._sim_store()
+        discount = cfg.trade_model.target_sale_discount_from_floor_pct
+        positions = {p["slug"]: p for p in store.get_positions(include_removed=True)}
+        last = store.get_last_events()
+        trades_by: Dict[str, List[Dict[str, Any]]] = {}
+        for t in store.get_trades(limit=5000):
+            trades_by.setdefault(t["slug"], []).append(t)
+        items = []
+        for f in store.get_final_list():
+            pos = positions.get(f["slug"])
+            d = describe_position(pos, discount) if pos else {}
+            trades = trades_by.get(f["slug"], [])
+            items.append({
+                **f,
+                "name": d.get("name") or f["slug"], "image": d.get("image"), "chain": d.get("chain"),
+                "currency": d.get("currency") or (trades[0]["currency"] if trades else None),
+                "status": d.get("status"), "bid_state": d.get("bid_state"), "bid": d.get("bid"),
+                "competitor_top": d.get("competitor_top"), "floor": d.get("floor"),
+                "entry_price": d.get("entry_price"), "ask": d.get("ask"),
+                "est_net": d.get("est_net"), "est_roi_pct": d.get("est_roi_pct"),
+                "now_net": d.get("now_net"), "now_roi_pct": d.get("now_roi_pct"),
+                "trades": len(trades), "realised_net": sum(t["net"] or 0 for t in trades) if trades else None,
+                "wins": sum(1 for t in trades if (t["net"] or 0) >= 0),
+                "last_event": last.get(f["slug"]), "last_tick_at": d.get("last_tick_at"),
+            })
+        self._send_json({"items": items, "interval_seconds": cfg.simulation.interval_seconds})
+
+    def _handle_final_action(self, action: str):
+        if action not in ("add", "remove"):
+            self._send_json({"error": "Unknown action"}, status=404)
+            return
+        body = self._read_json_body()
+        slug = self._slug_from(body.get("slug"))
+        if not slug:
+            self._send_json({"error": "Enter an OpenSea collection link or name."}, status=400)
+            return
+        store = self._sim_store()
+        if action == "remove":
+            if not store.remove_final(slug):
+                self._send_json({"error": "That collection isn't on the Final list."}, status=404)
+                return
+            self._send_json({"success": True})
+            return
+        if any(f["slug"] == slug for f in store.get_final_list()):
+            self._send_json({"error": "That collection is already on the Final list."}, status=409)
+            return
+        if store.get_position(slug) is None and not self._collection_exists(slug):
+            return
+        store.add_final(slug, added_by="you", note=str(body.get("note") or "")[:500])
+        pos = store.get_position(slug)
+        if pos is None:
+            store.add_position(slug, note="Added from the Final list. The first offer goes in at the next check.",
+                               source="final")
+        elif pos["status"] == "removed":
+            store.add_position(slug)
+        self._send_json({"success": True})
+
+    def _collection_exists(self, slug: str) -> bool:
+        """Checks OpenSea knows the collection; sends the error reply and returns False if not."""
+        provider = getattr(self.evaluator, "provider", None)
+        client = getattr(provider, "client", None)
+        if client is not None and hasattr(client, "set_api_key"):
+            key = reload_env()  # the current key from .env, even if it changed after the dashboard started
+            if key and key != client.api_key:
+                client.set_api_key(key)
+        try:
+            coll = provider.get_collection(slug) if provider is not None else None
+        except OpenSeaNetworkError:
+            self._send_json({"error": "Couldn't reach OpenSea. Try again in a minute."}, status=503)
+            return False
+        except Exception as e:
+            self._send_json({"error": f"Couldn't check that collection: {e}"}, status=502)
+            return False
+        if coll is None:
+            self._send_json({"error": f"Couldn't find '{slug}' on OpenSea."}, status=404)
+            return False
+        return True
+
     def _handle_simulation_action(self, action: str):
         if action not in ("add", "stop", "start", "remove"):
             self._send_json({"error": "Unknown action"}, status=404)
             return
         body = self._read_json_body()
-        slug = str(body.get("slug") or "").strip()
-        if "opensea.io/collection/" in slug:
-            slug = slug.split("opensea.io/collection/")[-1]
-        slug = slug.split("?")[0].split("#")[0].strip("/ ").lower()
+        slug = self._slug_from(body.get("slug"))
         if not slug:
             self._send_json({"error": "Enter an OpenSea collection link or name."}, status=400)
             return
@@ -774,22 +886,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             if existing and existing["status"] != "removed":
                 self._send_json({"error": "That collection is already in the simulation."}, status=409)
                 return
-            provider = getattr(self.evaluator, "provider", None)
-            client = getattr(provider, "client", None)
-            if client is not None and hasattr(client, "set_api_key"):
-                key = reload_env()  # the current key from .env, even if it changed after the dashboard started
-                if key and key != client.api_key:
-                    client.set_api_key(key)
-            try:
-                coll = provider.get_collection(slug) if provider is not None else None
-            except OpenSeaNetworkError:
-                self._send_json({"error": "Couldn't reach OpenSea. Try again in a minute."}, status=503)
-                return
-            except Exception as e:
-                self._send_json({"error": f"Couldn't check that collection: {e}"}, status=502)
-                return
-            if coll is None:
-                self._send_json({"error": f"Couldn't find '{slug}' on OpenSea."}, status=404)
+            if not self._collection_exists(slug):
                 return
             store.add_position(slug)
             self._send_json({"success": True, "position": store.get_position(slug)})
