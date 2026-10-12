@@ -493,3 +493,4 @@ h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
   .fin-row { grid-template-columns: auto 1fr; }
   .fin-side { grid-column: 1 / -1; justify-items: start; text-align: left; }
 }
+.fin-trial { margin: 4px 0 0; font-size: 13px; font-weight: 500; }

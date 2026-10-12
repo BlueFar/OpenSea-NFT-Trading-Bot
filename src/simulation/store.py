@@ -11,8 +11,11 @@ POSITION_COLUMNS = (
     "fee_pct", "royalty_pct", "gas",
     "entry_price", "entry_at", "entry_tx", "entry_token", "ask", "listed_at",
     "round_started_at", "last_tick_at", "last_sale_check", "note", "created_at", "updated_at",
-    "source", "auto_stopped",
+    "source", "auto_stopped", "leaving", "trial_round", "trial_state", "trial_started_at",
 )
+# Added after the first release: (column, type) brought into older databases
+LATER_COLUMNS = (("leaving", "INTEGER DEFAULT 0"), ("trial_round", "INTEGER"), ("trial_state", "TEXT"),
+                 ("trial_started_at", "INTEGER"))
 
 
 class SimStore:
@@ -51,6 +54,10 @@ class SimStore:
                     source TEXT, auto_stopped INTEGER DEFAULT 0
                 )
             """)
+            have = {r[1] for r in c.execute("PRAGMA table_info(sim_positions)")}
+            for col, kind in LATER_COLUMNS:
+                if col not in have:
+                    c.execute(f"ALTER TABLE sim_positions ADD COLUMN {col} {kind}")
             # What the market and our offer or listing looked like at each check
             c.execute("""
                 CREATE TABLE IF NOT EXISTS sim_ticks (
@@ -135,18 +142,33 @@ class SimStore:
         except sqlite3.OperationalError:  # the bot hasn't created its tables yet
             return []
 
-    def auto_stop(self, slug: str, stop: bool, note: str) -> None:
-        """Stops bidding on a collection that left the candidate list, or restarts it when it's back."""
-        pos = self.get_position(slug)
-        if pos is None:
-            return
-        if stop:
-            self.set_status(slug, "stop", note=note)
+    def failing_candidates(self) -> List[str]:
+        """Collections whose latest bot check failed a rule (so they're not on the Candidates page)."""
+        try:
             with self._conn() as conn:
-                conn.execute("UPDATE sim_positions SET auto_stopped=1 WHERE slug=?", (slug,))
-                conn.commit()
-        else:
-            self.set_status(slug, "start", note=note)
+                return [r[0] for r in conn.execute(
+                    "SELECT slug FROM monitored_collections WHERE last_result_pass=0 ORDER BY slug")]
+        except sqlite3.OperationalError:
+            return []
+
+    def auto_remove(self, slug: str, note: str) -> None:
+        """Takes out a collection that left the candidate list; it comes back if it passes again."""
+        if self.set_status(slug, "remove", note=note) is not None:
+            self.set_fields(slug, auto_stopped=1)
+
+    def set_fields(self, slug: str, event: Optional[tuple] = None, **fields: Any) -> None:
+        """Small bookkeeping changes (leaving, trial). Bumps rev, so a check in progress doesn't save over them."""
+        bad = set(fields) - set(POSITION_COLUMNS)
+        if bad:
+            raise ValueError(f"Unknown columns {bad}")
+        now = int(time.time())
+        with self._conn() as conn:
+            sets = ", ".join(f"{k}=?" for k in fields)
+            conn.execute(f"UPDATE sim_positions SET {sets}, updated_at=?, rev=COALESCE(rev, 0)+1 WHERE slug=?",
+                         (*fields.values(), now, slug))
+            if event:
+                conn.execute("INSERT INTO sim_events (ts, slug, kind, message) VALUES (?, ?, ?, ?)", (now, slug, *event))
+            conn.commit()
 
     # ------------------------------------------------------------------
     # Positions
@@ -208,7 +230,7 @@ class SimStore:
             raise ValueError(f"Unknown action {action}")
         with self._conn() as conn:
             note = note or msg
-            fields = {"status": status, "note": None, "updated_at": now, "auto_stopped": 0}
+            fields = {"status": status, "note": None, "updated_at": now, "auto_stopped": 0, "leaving": 0}
             if action == "start" and status == "bidding":
                 # A fresh offer: sales from while it was stopped don't count
                 fields.update({"bid": None, "bid_state": None, "round_started_at": None, "last_sale_check": None})
@@ -283,6 +305,13 @@ class SimStore:
                     f"SELECT event_id FROM sim_seen_sales WHERE slug=? AND event_id IN ({','.join('?' * len(part))})",
                     [slug, *part]))
         return out
+
+    def get_round_sales(self, slug: str, from_round: int) -> List[Dict[str, Any]]:
+        """Completed sales (not removals) of a collection from a round on, oldest first."""
+        with self._conn() as conn:
+            rows = conn.execute("SELECT round, net, currency FROM sim_trades WHERE slug=? AND round>=? AND how='sold' "
+                                "ORDER BY id", (slug, from_round)).fetchall()
+        return [dict(zip(("round", "net", "currency"), r)) for r in rows]
 
     def get_trades(self, limit: int = 200) -> List[Dict[str, Any]]:
         cols = ("id", "slug", "round", "currency", "entry_price", "entry_at", "entry_tx", "entry_token",

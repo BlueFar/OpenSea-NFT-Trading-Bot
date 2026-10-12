@@ -181,7 +181,13 @@ class NFTBot:
     def _maybe_run_simulation(self) -> None:
         """Paper trading (Simulation page): checks its offers and listings every simulation.interval_seconds."""
         sim = self.config.simulation
-        if not sim.enabled or time.time() - self._last_sim_time < sim.interval_seconds:
+        if not sim.enabled:
+            return
+        if time.time() - self._last_sim_time < sim.interval_seconds:
+            try:  # between rounds, still follow the Candidates page as each collection check lands
+                self.simulator.seed()
+            except Exception as e:
+                logger.error("Simulation update failed: %s", e)
             return
         self._last_sim_time = time.time()
         try:

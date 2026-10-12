@@ -9,7 +9,7 @@
   var EVENT_COLORS = { placed: "c-accent", raised: "c-accent", lowered: "c-muted", top: "c-good", capped: "c-warn",
                        limit: "c-muted", paused: "c-warn", filled: "c-good", listed: "c-accent", repriced: "c-muted",
                        sold: "c-good", ignored: "c-muted", problem: "c-bad", added: "c-muted", stop: "c-muted",
-                       start: "c-muted", remove: "c-muted" };
+                       start: "c-muted", remove: "c-muted", trial: "c-warn", kept: "c-good" };
   var data = null, busy = false;
 
   // Offers sit 0.1% apart, so prices here show at least 4 significant digits (with the dollar value on hover)
@@ -31,6 +31,14 @@
   }
   function osLink(slug, text) {
     return '<a href="https://opensea.io/collection/' + encodeURIComponent(slug) + '" target="_blank" rel="noopener">' + esc(text) + "</a>";
+  }
+
+  // A Final list pick that stopped passing gets one simulated round (7 days at most) to show a profit
+  function trialText(p) {
+    if (p.trial_state === "on") return "stopped passing: on trial until its round ends" +
+      (p.trial_started_at ? " (by " + N.fmtDay(p.trial_started_at + 7 * 86400) + ")" : "");
+    if (p.trial_state === "kept") return "stopped passing, kept after a profitable trial";
+    return "";
   }
 
   function statusPill(p) {
@@ -93,7 +101,9 @@
     var meta = [N.chainName(p.chain)];
     if ((data.final || []).indexOf(p.slug) >= 0) meta.push("Final list");
     else if (p.source === "candidate") meta.push("Candidate");
-    if (p.auto_stopped) meta.push("stopped: no longer passes the checks");
+    if (p.leaving) meta.push("off the Candidates list: leaves once the item sells");
+    var trial = trialText(p);
+    if (trial) meta.push(trial);
     if ((p.round || 1) > 1) meta.push("round " + p.round);
     if (p.times_outbid) meta.push("outbid " + p.times_outbid + (p.times_outbid === 1 ? " time" : " times"));
     var btns = (p.status === "stopped"
@@ -162,7 +172,7 @@
     $("simRules").innerHTML = '<div class="section-title"><h2>How it plays</h2><form class="sim-every" id="simEvery"><label for="simEveryIn">Check every</label> ' +
       '<input id="simEveryIn" type="number" min="1" max="1440" step="1" value="' + fmt(d.interval_seconds / 60, 0).replace(/,/g, "") + '"> minutes ' +
       '<button class="btn ghost" type="submit">Save</button></form></div>' +
-      '<p class="chart-note" style="margin:0 0 10px">Simulating ' + scope + ". Checking more often answers outbids sooner but slows the candidate scan, which shares the same OpenSea allowance.</p>" +
+      '<p class="chart-note" style="margin:0 0 10px">Simulating ' + scope + ". A candidate that stops passing the bot's rules leaves straight away (after selling anything bought); a Final list pick gets one more round to show a profit. Checking more often answers outbids sooner but slows the candidate scan, which shares the same OpenSea allowance.</p>" +
       '<ol class="sim-steps">' +
       "<li><strong>Bid.</strong> One offer per collection, " + fmt(d.outbid_step_pct, 1) + "% above the best real offer, so it's the best offer at the smallest price. It follows other bidders up and down.</li>" +
       "<li><strong>Stop at the limit.</strong> We never offer so much that the floor is less than " + fmt(d.min_profit_gap_pct, 0) + "% above our offer (royalty included). If someone bids higher, we stay at that limit.</li>" +
@@ -250,6 +260,7 @@
       '<div class="fin-main"><div class="cand-name"><span>' + osLink(f.slug, f.name || f.slug) + "</span></div>" +
       '<div class="cand-meta">' + esc([N.chainName(f.chain), f.added_by === "claude" ? "added by Claude" : "added by you"].filter(Boolean).join(" · ")) + "</div>" +
       (f.note ? '<p class="fin-note">' + esc(f.note) + "</p>" : "") +
+      (trialText(f) ? '<p class="fin-trial ' + (f.trial_state === "on" ? "c-warn" : "c-good") + '">' + esc(N.cap(trialText(f))) + "</p>" : "") +
       '<p class="fin-state">' + esc(stateLine) + "</p>" +
       (f.last_event ? '<p class="sim-last"><span class="muted">' + esc(N.ago(f.last_event.ts)) + ":</span> " + esc(f.last_event.message) + "</p>" : "") + "</div>" +
       '<div class="fin-side">' + (f.status ? statusPill(f) : '<span class="pill neutral">Not simulated</span>') +

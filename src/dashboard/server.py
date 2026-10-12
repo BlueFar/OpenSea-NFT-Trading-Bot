@@ -817,6 +817,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 "trades": len(trades), "realised_net": sum(t["net"] or 0 for t in trades) if trades else None,
                 "wins": sum(1 for t in trades if (t["net"] or 0) >= 0),
                 "last_event": last.get(f["slug"]), "last_tick_at": d.get("last_tick_at"),
+                "trial_state": d.get("trial_state"), "trial_started_at": d.get("trial_started_at"),
             })
         self._send_json({"items": items, "interval_seconds": cfg.simulation.interval_seconds})
 

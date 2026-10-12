@@ -212,6 +212,9 @@ class SimDataError(Exception):
     """OpenSea didn't return what a check needs; the position is left as it was."""
 
 
+TRIAL_DAYS = 7  # longest a Final list pick that stopped passing gets to finish its trial round
+
+
 class PaperTrader:
     def __init__(self, provider, state_store, config, sim_store: Optional[SimStore] = None):
         self.provider = provider
@@ -223,41 +226,99 @@ class PaperTrader:
     def sim(self):
         return self.config.simulation
 
-    def seed(self) -> None:
+    def seed(self, now: Optional[int] = None) -> None:
         """
-        Which collections to simulate: the settings file's list, the Final list and (include_candidates) every
-        collection on the Candidates page. Each starts once; removing one on the dashboard sticks. A candidate
-        that stops passing stops bidding (an item already bought is still sold), and restarts if it passes again.
+        Keeps the simulation in step with the settings file, the Final list and the Candidates page. Cheap (no
+        OpenSea calls), so the bot runs it after every collection check, not just every simulation round.
+        - Settings file and Final list collections start once; removing one on the dashboard sticks.
+        - include_candidates: every collection that passes the bot's rules is simulated. One that stops passing
+          is removed at once, or after its bought item sells; it comes back if it passes again.
+        - A Final list pick that stops passing gets a trial: one more simulated round (TRIAL_DAYS at most).
+          A profit keeps it on the Final list; a loss or no finished round removes it from both.
         """
+        now = int(now if now is not None else time.time())
         if self.sim.final_list:
             self.store.seed_final(self.sim.final_list)
-        keep = set()
+        final = {f["slug"] for f in self.store.get_final_list()}
+        keep = set(final)
         for slug, source, note in (
             [(s, "config", "Added from the settings file.") for s in self.sim.collections or []]
-            + [(f["slug"], "final", "Added from the Final list.") for f in self.store.get_final_list()]
+            + [(s, "final", "Added from the Final list.") for s in sorted(final)]
         ):
             slug = (slug or "").strip()
             keep.add(slug)
             if slug and self.store.get_position(slug) is None:
                 self.store.add_position(slug, note=note + " The first offer goes in at the next check.", source=source)
+        passing = set(self.store.passing_candidates())
+        failing = set(self.store.failing_candidates())
+        self._final_trials(final, passing, failing, now)
         if not self.sim.include_candidates:
             return
-        passing = set(self.store.passing_candidates())
         for slug in sorted(passing):
             pos = self.store.get_position(slug)
             if pos is None:
                 self.store.add_position(slug, note="New candidate. The first offer goes in at the next check.",
                                         source="candidate")
-            elif pos["status"] == "stopped" and pos.get("auto_stopped"):
-                self.store.auto_stop(slug, False, "Passing the bot's rules again: bidding again.")
+            elif pos.get("auto_stopped") and pos["status"] in ("stopped", "removed"):
+                self.store.set_status(slug, "start", note="Back on the Candidates list: bidding again.")
+            elif pos.get("leaving"):
+                self.store.set_fields(slug, leaving=0, event=("start", "Back on the Candidates list: it bids again "
+                                                                        "after this sale."))
         for pos in self.store.get_positions():
-            if (pos.get("source") == "candidate" and pos["status"] == "bidding" and pos["slug"] not in passing
-                    and pos["slug"] not in keep):
-                self.store.auto_stop(pos["slug"], True, "No longer passes the bot's rules: stopped bidding.")
+            slug = pos["slug"]
+            if pos.get("source") != "candidate" or slug in passing or slug in keep:
+                continue
+            if pos["status"] == "holding":
+                if not pos.get("leaving"):
+                    self.store.set_fields(slug, leaving=1, event=(
+                        "stop", "Off the Candidates list: no new offers. It leaves the simulation once the "
+                                "bought item sells."))
+            elif pos["status"] == "stopped" and not pos.get("auto_stopped"):
+                self.store.set_status(slug, "remove", note="Off the Candidates list: removed from the simulation.")
+            else:
+                self.store.auto_remove(slug, "Off the Candidates list: removed from the simulation.")
+
+    def _final_trials(self, final, passing, failing, now: int) -> None:
+        discount = self.config.trade_model.target_sale_discount_from_floor_pct
+        for slug in sorted(final):
+            pos = self.store.get_position(slug)
+            if pos is None or pos["status"] == "removed":
+                continue
+            state = pos.get("trial_state")
+            if slug in passing:
+                if state:
+                    self.store.set_fields(slug, trial_state=None, trial_round=None, trial_started_at=None, event=(
+                        ("start", "Passing the bot's rules again: the trial is over and it stays on the Final list.")
+                        if state == "on" else None))
+                continue
+            if slug not in failing or state == "kept":
+                continue  # not checked by the bot yet, or already earned its place
+            if state is None:
+                self.store.set_fields(slug, trial_state="on", trial_round=pos.get("round") or 1, trial_started_at=now,
+                                      event=("trial", f"Stopped passing the bot's rules. It stays on the Final list "
+                                                      f"for one more simulated round ({TRIAL_DAYS} days at most): kept "
+                                                      f"if that round makes a profit, removed everywhere if not."))
+                continue
+            sales = self.store.get_round_sales(slug, pos.get("trial_round") or 1)
+            if sales and sales[0]["net"] is not None and sales[0]["net"] > 0:
+                self.store.set_fields(slug, trial_state="kept", event=(
+                    "kept", f"Trial passed: the round made {fmt_price(sales[0]['net'], sales[0]['currency'])}. "
+                            f"It stays on the Final list."))
+                continue
+            if sales:
+                why = "its round made no profit"
+            elif now - (pos.get("trial_started_at") or now) >= TRIAL_DAYS * 86400:
+                why = f"no round finished within {TRIAL_DAYS} days"
+            else:
+                continue
+            self.store.remove_final(slug)
+            closing = closing_trade(pos, discount, now) if pos.get("entry_price") is not None else None
+            self.store.set_status(slug, "remove", closing_trade=closing,
+                                  note=f"Trial failed ({why}): removed from the Final list and the simulation.")
 
     def tick(self, now: Optional[int] = None, keep_running: Callable[[], bool] = lambda: True) -> int:
         """One check of every active position. OpenSeaNetworkError is passed up (the bot pauses)."""
-        self.seed()
+        self.seed(now)
         done = 0
         for pos in self.store.get_positions():
             if pos["status"] not in ACTIVE_STATUSES:
@@ -274,6 +335,7 @@ class PaperTrader:
             except Exception as e:  # one collection's problem must not stop the others or the bot
                 logger.exception("Simulation check failed for %s", pos["slug"])
                 self._note_problem(pos, f"Check failed: {e}")
+        self.seed(now)  # act on sales made this check (a leaving collection, a Final list trial) straight away
         return done
 
     def _note_problem(self, pos: Dict[str, Any], message: str) -> None:
@@ -477,7 +539,11 @@ class PaperTrader:
         say("sold", f"Sold for {fmt_price(ask, cur)} after {held}: a buyer paid {fmt_price(price, cur)} for one. "
                     f"{'Profit' if r['net'] >= 0 else 'Loss'} {fmt_price(abs(r['net']), cur)} "
                     f"({r['roi_pct']:+.0f}%) after OpenSea fee, royalty and gas.")
-        if self.sim.repeat:
+        if p.get("leaving"):
+            say("remove", "Off the Candidates list, so it leaves the simulation now the item has sold.")
+            p.update({"status": "removed", "auto_stopped": 1, "leaving": 0, "entry_price": None, "entry_at": None,
+                      "entry_tx": None, "entry_token": None, "ask": None, "listed_at": None})
+        elif self.sim.repeat:
             p.update({"status": "bidding", "round": (p["round"] or 1) + 1, "bid": None, "bid_state": None,
                       "competitor_top": None, "max_bid": None, "times_outbid": 0, "highest_bid": None,
                       "entry_price": None, "entry_at": None, "entry_tx": None, "entry_token": None,

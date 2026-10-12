@@ -521,17 +521,18 @@ def test_candidates_join_and_leave_the_simulation_with_the_bots_checks(tmp_path)
     t.seed()
     assert {p["slug"]: p["source"] for p in t.store.get_positions()} == {"alpha": "candidate", "beta": "candidate"}
 
+    # Stops passing: out of the simulation at once
     _passing(state, "beta", passes=False)
     t.seed()
-    beta = t.store.get_position("beta")
-    assert beta["status"] == "stopped" and beta["auto_stopped"]
+    assert t.store.get_position("beta")["status"] == "removed"
     assert t.store.get_position("alpha")["status"] == "bidding"
 
+    # Passes again: back in
     _passing(state, "beta")
     t.seed()
     assert t.store.get_position("beta")["status"] == "bidding"
 
-    # Stopped by hand: stays stopped even though it still passes
+    # Stopped by hand: stays stopped while it passes
     t.store.set_status("alpha", "stop")
     t.seed()
     assert t.store.get_position("alpha")["status"] == "stopped"
@@ -539,6 +540,89 @@ def test_candidates_join_and_leave_the_simulation_with_the_bots_checks(tmp_path)
     t.store.set_status("beta", "remove")
     t.seed()
     assert t.store.get_position("beta")["status"] == "removed"
+
+
+def test_a_candidate_that_stops_passing_while_holding_leaves_after_the_sale(tmp_path):
+    m, t, state, t0 = _holding(tmp_path)
+    t.sim.collections, t.sim.include_candidates = [], True
+    _passing(state, "kongz")  # (bought while it passed)
+    with sqlite3.connect(state.db_path) as c:
+        c.execute("UPDATE sim_positions SET source='candidate' WHERE slug='kongz'")
+    _passing(state, "kongz", passes=False)
+    t.seed()
+    p = t.store.get_position("kongz")
+    assert p["status"] == "holding" and p["leaving"] == 1
+    m.sale(t0 + 400, 0.11)
+    t.tick(now=t0 + 600)
+    p = t.store.get_position("kongz")
+    assert p["status"] == "removed" and p["entry_price"] is None
+    [trade] = t.store.get_trades()
+    assert trade["how"] == "sold" and trade["net"] > 0
+    # Passes again: comes back with a fresh offer
+    _passing(state, "kongz")
+    t.seed()
+    assert t.store.get_position("kongz")["status"] == "bidding"
+
+
+def test_final_list_pick_that_stops_passing_is_kept_after_a_profitable_round(tmp_path):
+    m, t, state, t0 = _holding(tmp_path, collections=[], include_candidates=True, final_list={"kongz": "pick"})
+    _passing(state, "kongz", passes=False)
+    t.seed(now=t0 + 350)
+    p = t.store.get_position("kongz")
+    assert p["trial_state"] == "on" and p["trial_round"] == 1 and p["status"] == "holding"
+    assert t.store.get_last_events()["kongz"]["kind"] == "trial"
+    m.sale(t0 + 400, 0.11)
+    t.tick(now=t0 + 600)
+    p = t.store.get_position("kongz")
+    assert p["trial_state"] == "kept" and p["status"] == "bidding" and p["round"] == 2
+    assert [f["slug"] for f in t.store.get_final_list()] == ["kongz"]
+    # Kept: no new trial while it keeps failing
+    t.seed(now=t0 + 30 * 86400)
+    assert t.store.get_position("kongz")["trial_state"] == "kept"
+    # Passing again clears it, so a later fail starts a fresh trial
+    _passing(state, "kongz")
+    t.seed()
+    assert t.store.get_position("kongz")["trial_state"] is None
+
+
+def test_final_list_pick_whose_trial_round_does_not_finish_in_time_is_removed_everywhere(tmp_path):
+    m, t, state, t0 = _holding(tmp_path, collections=[], include_candidates=True, final_list={"kongz": "pick"})
+    _passing(state, "kongz", passes=False)
+    t.seed(now=t0 + 350)
+    t.seed(now=t0 + 350 + 6 * 86400)
+    assert t.store.get_position("kongz")["status"] == "holding"
+    t.seed(now=t0 + 350 + 7 * 86400)
+    assert t.store.get_position("kongz")["status"] == "removed"
+    assert t.store.get_final_list() == []
+    [trade] = t.store.get_trades()
+    assert trade["how"] == "removed"  # the bought item still counts in the results, at the floor
+    assert "Trial failed" in t.store.get_last_events()["kongz"]["message"]
+    # Not added back from the settings file or the Final list seed
+    t.seed()
+    assert t.store.get_position("kongz")["status"] == "removed"
+
+
+def test_final_list_trial_ends_if_it_passes_again(tmp_path):
+    m = FakeMarket()
+    t, state = _trader(tmp_path, m, collections=[], final_list={"kongz": "pick"})
+    _passing(state, "kongz", passes=False)
+    t.seed()
+    assert t.store.get_position("kongz")["trial_state"] == "on"
+    _passing(state, "kongz")
+    t.seed()
+    assert t.store.get_position("kongz")["trial_state"] is None
+    assert t.store.get_last_events()["kongz"]["kind"] == "start"
+
+
+def test_older_databases_get_the_new_columns(tmp_path):
+    db = str(tmp_path / "old.db")
+    with sqlite3.connect(db) as c:
+        c.execute("CREATE TABLE sim_positions (slug TEXT PRIMARY KEY, name TEXT, status TEXT, source TEXT, "
+                  "auto_stopped INTEGER DEFAULT 0)")
+    SimStore(db)
+    with sqlite3.connect(db) as c:
+        cols = {r[1] for r in c.execute("PRAGMA table_info(sim_positions)")}
+    assert {"leaving", "trial_round", "trial_state", "trial_started_at"} <= cols
 
 
 def test_final_list_is_seeded_once_and_feeds_the_simulation(tmp_path):
