@@ -91,6 +91,15 @@ class SimStore:
                 )
             """)
             c.execute("CREATE TABLE IF NOT EXISTS sim_meta (key TEXT PRIMARY KEY, value TEXT)")
+            # A Final list collection that stopped passing gets one simulated round to prove itself.
+            # status: "active" (waiting for that round), "kept" (the round made a profit). A row means
+            # the drop was handled; it is deleted when the collection passes the bot's rules again.
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS final_grace (
+                    slug TEXT PRIMARY KEY, status TEXT, started_at INTEGER, deadline INTEGER,
+                    rule TEXT, reason TEXT, ended_at INTEGER, result_net REAL
+                )
+            """)
             conn.commit()
 
     # ------------------------------------------------------------------
@@ -125,6 +134,64 @@ class SimStore:
             cur = conn.execute("DELETE FROM final_list WHERE slug=?", (slug,))
             conn.commit()
             return cur.rowcount == 1
+
+    def is_final(self, slug: str) -> bool:
+        with self._conn() as conn:
+            return conn.execute("SELECT 1 FROM final_list WHERE slug=?", (slug,)).fetchone() is not None
+
+    # A Final list collection that stopped passing: one simulated round to prove itself
+    GRACE_COLUMNS = ("slug", "status", "started_at", "deadline", "rule", "reason", "ended_at", "result_net")
+
+    def get_grace(self, slug: str) -> Optional[Dict[str, Any]]:
+        with self._conn() as conn:
+            r = conn.execute(f"SELECT {', '.join(self.GRACE_COLUMNS)} FROM final_grace WHERE slug=?", (slug,)).fetchone()
+        return dict(zip(self.GRACE_COLUMNS, r)) if r else None
+
+    def get_graces(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        q = f"SELECT {', '.join(self.GRACE_COLUMNS)} FROM final_grace" + (" WHERE status=?" if status else "")
+        with self._conn() as conn:
+            rows = conn.execute(q + " ORDER BY started_at", (status,) if status else ()).fetchall()
+        return [dict(zip(self.GRACE_COLUMNS, r)) for r in rows]
+
+    def start_grace(self, slug: str, started_at: int, deadline: int, rule: Optional[str], reason: Optional[str]) -> bool:
+        """False if this drop was already handled (a grace is running or the collection was kept)."""
+        with self._conn() as conn:
+            cur = conn.execute("INSERT OR IGNORE INTO final_grace (slug, status, started_at, deadline, rule, reason) "
+                               "VALUES (?, 'active', ?, ?, ?, ?)", (slug, started_at, deadline, rule, reason))
+            conn.commit()
+            return cur.rowcount == 1
+
+    def end_grace(self, slug: str, status: Optional[str] = None, result_net: Optional[float] = None) -> None:
+        """status "kept" records the outcome; None forgets the drop (it passes again, or left the Final list)."""
+        with self._conn() as conn:
+            if status:
+                conn.execute("UPDATE final_grace SET status=?, ended_at=?, result_net=? WHERE slug=?",
+                             (status, int(time.time()), result_net, slug))
+            else:
+                conn.execute("DELETE FROM final_grace WHERE slug=?", (slug,))
+            conn.commit()
+
+    def trades_for(self, slug: str, since_ts: int = 0) -> List[Dict[str, Any]]:
+        """Completed round trips of one collection that ended at or after since_ts, oldest first."""
+        cols = ("id", "slug", "currency", "entry_price", "entry_at", "exit_price", "exit_at", "net", "roi_pct", "how")
+        with self._conn() as conn:
+            rows = conn.execute(f"SELECT {', '.join(cols)} FROM sim_trades WHERE slug=? AND exit_at>=? ORDER BY exit_at, id",
+                                (slug, since_ts)).fetchall()
+        return [dict(zip(cols, r)) for r in rows]
+
+    def auto_remove(self, slug: str, note: str, closing_trade: Optional[Dict[str, Any]] = None) -> bool:
+        """
+        Takes a collection out of the simulation because it left the candidate list (an item it holds is
+        valued at today's floor). Marked automatic, so it comes back if it passes again.
+        """
+        pos = self.get_position(slug)
+        if pos is None or pos["status"] == "removed":
+            return False
+        self.set_status(slug, "remove", closing_trade=closing_trade, note=note)
+        with self._conn() as conn:
+            conn.execute("UPDATE sim_positions SET auto_stopped=1 WHERE slug=?", (slug,))
+            conn.commit()
+        return True
 
     def passing_candidates(self) -> List[str]:
         """Collections whose latest bot check passed every rule (the Candidates page)."""
