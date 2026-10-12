@@ -87,7 +87,7 @@ class FakeMarket:
     def get_collection(self, slug):
         return self.coll
 
-    def get_collection_stats(self, slug):
+    def get_collection_stats(self, slug, max_age=300.0):
         return CollectionStats(floor_price=self.floor, floor_price_symbol="ETH")
 
     def get_top_offer(self, slug, currency_filter=None):
@@ -344,6 +344,7 @@ def test_dashboard_simulation_api(tmp_path):
         [p] = r["positions"]
         assert p["name"] == "Smol Brains" and p["gap_pct"] > 40 and p["est_net"] > 0
         assert len(r["charts"]["smol-brains"]) == 1 and r["events"][0]["name"] == "Smol Brains"
+        assert p["last_event"]["kind"] == "added"
 
         assert _call("POST", "/api/simulation/stop", env, {"slug": "smol-brains"})[1]["position"]["status"] == "stopped"
         assert _call("POST", "/api/simulation/start", env, {"slug": "smol-brains"})[1]["position"]["status"] == "bidding"
@@ -358,3 +359,146 @@ def test_simulation_settings_are_in_the_config_file():
     assert raw["simulation"]["collections"] == ["cyberkongz-babies", "buckets-club-front-nine", "smol-brains",
                                                 "sleap-io-city-collection-base", "chicken-derby"]
     assert raw["simulation"]["min_profit_gap_pct"] == 40.0
+
+
+# ----------------------------------------------------------------------
+# Cases found in review
+# ----------------------------------------------------------------------
+def _holding(tmp_path, **sim):
+    """A position that bought at 0.05966 and listed at 0.1034 (floor 0.1088)."""
+    m = FakeMarket()
+    trader, state = _trader(tmp_path, m, **sim)
+    t0 = int(time.time()) - 20000
+    trader.tick(now=t0)
+    m.sale(t0 + 100, 0.0596)
+    trader.tick(now=t0 + 300)
+    p = trader.store.get_position("kongz")
+    assert p["status"] == "holding" and p["ask"] == 0.1034
+    return m, trader, state, t0
+
+
+def test_sales_made_while_stopped_never_count(tmp_path):
+    m = FakeMarket()
+    trader, _ = _trader(tmp_path, m)
+    t0 = int(time.time()) - 20000
+    trader.tick(now=t0)
+    trader.store.set_status("kongz", "stop")
+    m.sale(t0 + 1000, 0.0596)                       # would have filled the old offer
+    trader.store.set_status("kongz", "start")
+    trader.tick(now=t0 + 1300)
+    trader.tick(now=t0 + 1600)
+    assert trader.store.get_position("kongz")["status"] == "bidding"
+
+    m2, trader2, _, t1 = _holding(tmp_path / "h")
+    trader2.store.set_status("kongz", "stop")
+    m2.sale(t1 + 1000, 0.105)                       # would have bought the old listing
+    trader2.store.set_status("kongz", "start")
+    trader2.tick(now=t1 + 1300)
+    trader2.tick(now=t1 + 1600)
+    assert trader2.store.get_position("kongz")["status"] == "holding" and trader2.store.get_trades() == []
+
+
+def test_a_listing_held_at_break_even_above_the_floor_only_sells_once_the_floor_reaches_it(tmp_path):
+    m, trader, _, t0 = _holding(tmp_path)
+    m.floor = 0.062                                 # break-even is ~0.0688
+    trader.tick(now=t0 + 600)
+    ask = trader.store.get_position("kongz")["ask"]
+    assert ask > m.floor
+    m.sale(t0 + 700, 0.070)                         # someone picked a particular item above the floor
+    trader.tick(now=t0 + 900)
+    assert trader.store.get_trades() == []
+    m.floor = 0.075                                 # the cheaper listings sold: ours is now under the floor
+    m.sale(t0 + 1000, 0.075)
+    trader.tick(now=t0 + 1200)
+    [t] = trader.store.get_trades()
+    assert t["exit_price"] == ask and t["net"] >= 0
+
+
+def test_wash_trades_and_item_offer_accepts_are_not_buyers(tmp_path):
+    m, trader, _, t0 = _holding(tmp_path)
+    ev = m.sale(t0 + 400, 0.108)
+    ev.seller = ev.buyer = "0xAAA"                  # trading with yourself
+    m.sale(t0 + 450, 0.106, order_hash="0xtrait")   # a seller accepted a trait offer
+    m.orders["0xtrait"] = {"kind": "offer", "offer_type": "trait"}
+    trader.tick(now=t0 + 600)
+    assert trader.store.get_trades() == []
+    m.sale(t0 + 700, 0.106, order_hash="0xbuy")     # a buyer bought a listing
+    m.orders["0xbuy"] = {"kind": "listing", "offer_type": None}
+    trader.tick(now=t0 + 900)
+    assert len(trader.store.get_trades()) == 1
+
+
+def test_currency_waits_for_a_real_floor(tmp_path):
+    m = FakeMarket()
+    trader, _ = _trader(tmp_path, m)
+    real = m.get_collection_stats
+    m.get_collection_stats = lambda slug, max_age=300.0: CollectionStats(floor_price=None, floor_price_symbol="ETH")
+    trader.tick(now=int(time.time()) - 900)
+    p = trader.store.get_position("kongz")
+    assert p["currency"] is None and p["bid"] is None and "No floor price" in p["note"]
+    m.get_collection_stats = real
+    trader.tick(now=int(time.time()) - 600)
+    p = trader.store.get_position("kongz")
+    assert p["currency"] == "ETH" and p["bid"] == 0.05966 and p["note"] is None
+
+
+def test_floor_moves_while_capped_are_not_counted_as_outbids(tmp_path):
+    m = FakeMarket()
+    trader, _ = _trader(tmp_path, m)
+    t0 = int(time.time()) - 20000
+    trader.tick(now=t0)
+    m.top = 0.09
+    trader.tick(now=t0 + 300)
+    for i, f in enumerate((0.110, 0.108, 0.111, 0.107)):
+        m.floor = f
+        trader.tick(now=t0 + 600 + 300 * i)
+    p = trader.store.get_position("kongz")
+    assert p["bid_state"] == "capped" and p["times_outbid"] == 1
+
+
+def test_a_sale_waiting_for_an_order_look_up_is_judged_at_the_next_check(tmp_path):
+    m = FakeMarket()
+    trader, _ = _trader(tmp_path, m)
+    t0 = int(time.time()) - 20000
+    trader.tick(now=t0)
+    for i in range(5):                              # five private sales use up this check's look-ups
+        m.sale(t0 + 100 + i, 0.01, order_hash=f"0xp{i}")
+        m.orders[f"0xp{i}"] = {"kind": "listing", "offer_type": None}
+    m.sale(t0 + 200, 0.03, order_hash="0xbid")      # a seller accepted a low collection offer
+    m.orders["0xbid"] = {"kind": "offer", "offer_type": "collection"}
+    trader.tick(now=t0 + 300)
+    assert trader.store.get_position("kongz")["status"] == "bidding"
+    trader.tick(now=t0 + 600)
+    p = trader.store.get_position("kongz")
+    assert p["status"] == "holding" and p["entry_at"] == t0 + 200
+
+
+def test_a_failed_sales_download_is_retried_and_a_truncated_one_is_flagged(tmp_path):
+    m = FakeMarket()
+    trader, _ = _trader(tmp_path, m)
+    t0 = int(time.time()) - 20000
+    trader.tick(now=t0)
+    m.get_sale_events_since = lambda slug, after_timestamp, max_pages=10: (None, False)
+    m.sale(t0 + 100, 0.0596)
+    trader.tick(now=t0 + 300)
+    p = trader.store.get_position("kongz")
+    assert p["status"] == "bidding" and p["last_sale_check"] == t0
+    m.get_sale_events_since = lambda slug, after_timestamp, max_pages=10: (list(m.sales), False)
+    trader.tick(now=t0 + 600)
+    p = trader.store.get_position("kongz")
+    assert p["status"] == "holding" and p["last_sale_check"] == t0 + 600
+    assert any(e["kind"] == "problem" and "1,000" in e["message"] for e in trader.store.get_events())
+
+
+def test_removing_a_held_item_keeps_it_in_the_results(tmp_path):
+    from src.simulation.engine import closing_trade
+    m, trader, _, t0 = _holding(tmp_path)
+    m.floor = 0.05
+    trader.tick(now=t0 + 600)
+    pos = trader.store.get_position("kongz")
+    trader.store.set_status("kongz", "remove", closing_trade=closing_trade(pos, 5.0))
+    [t] = trader.store.get_trades()
+    assert t["how"] == "removed" and t["exit_price"] == pytest.approx(0.0475) and t["net"] < 0
+    trader.store.add_position("kongz")
+    p = trader.store.get_position("kongz")
+    assert p["status"] == "bidding" and p["entry_price"] is None

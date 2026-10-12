@@ -64,7 +64,8 @@ class SimStore:
                     slug TEXT, round INTEGER, currency TEXT,
                     entry_price REAL, entry_at INTEGER, entry_tx TEXT, entry_token TEXT,
                     exit_price REAL, exit_at INTEGER, exit_tx TEXT,
-                    fees REAL, gas REAL, net REAL, roi_pct REAL, times_outbid INTEGER
+                    fees REAL, gas REAL, net REAL, roi_pct REAL, times_outbid INTEGER,
+                    how TEXT
                 )
             """)
             # Plain-language log for the dashboard
@@ -119,8 +120,12 @@ class SimStore:
             conn.commit()
         return True
 
-    def set_status(self, slug: str, action: str) -> Optional[Dict[str, Any]]:
-        """Dashboard buttons: stop, start or remove. Start resumes the listing if an item was bought."""
+    def set_status(self, slug: str, action: str,
+                   closing_trade: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """
+        Dashboard buttons: stop, start or remove. Start resumes the listing if an item was bought.
+        closing_trade: on remove, the bought item valued at today's floor, so it stays in the results.
+        """
         pos = self.get_position(slug)
         if pos is None:
             return None
@@ -137,14 +142,21 @@ class SimStore:
         else:
             raise ValueError(f"Unknown action {action}")
         with self._conn() as conn:
-            fields = {"status": status, "note": note, "updated_at": now, "rev": (pos["rev"] or 0) + 1}
+            fields = {"status": status, "note": note, "updated_at": now}
             if action == "start" and status == "bidding":
                 # A fresh offer: sales from while it was stopped don't count
                 fields.update({"bid": None, "bid_state": None, "round_started_at": None, "last_sale_check": None})
             if action == "start" and status == "holding":
                 fields.update({"listed_at": None, "ask": None, "last_sale_check": None})
+            if action == "remove" and closing_trade:
+                fields.update({"entry_price": None, "entry_at": None, "entry_tx": None, "entry_token": None,
+                               "ask": None, "listed_at": None})
+                keys = list(closing_trade.keys())
+                conn.execute(f"INSERT INTO sim_trades ({', '.join(keys)}) VALUES ({', '.join('?' * len(keys))})",
+                             [closing_trade[k] for k in keys])
             sets = ", ".join(f"{k}=?" for k in fields)
-            conn.execute(f"UPDATE sim_positions SET {sets} WHERE slug=?", (*fields.values(), slug))
+            # rev+1 in SQL: a check the bot started before this click can't save over it
+            conn.execute(f"UPDATE sim_positions SET {sets}, rev=COALESCE(rev, 0)+1 WHERE slug=?", (*fields.values(), slug))
             conn.execute("INSERT INTO sim_events (ts, slug, kind, message) VALUES (?, ?, ?, ?)",
                          (now, slug, action, note))
             conn.commit()
@@ -208,7 +220,7 @@ class SimStore:
 
     def get_trades(self, limit: int = 200) -> List[Dict[str, Any]]:
         cols = ("id", "slug", "round", "currency", "entry_price", "entry_at", "entry_tx", "entry_token",
-                "exit_price", "exit_at", "exit_tx", "fees", "gas", "net", "roi_pct", "times_outbid")
+                "exit_price", "exit_at", "exit_tx", "fees", "gas", "net", "roi_pct", "times_outbid", "how")
         with self._conn() as conn:
             rows = conn.execute(f"SELECT {', '.join(cols)} FROM sim_trades ORDER BY exit_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(zip(cols, r)) for r in rows]
@@ -217,6 +229,13 @@ class SimStore:
         with self._conn() as conn:
             rows = conn.execute("SELECT ts, slug, kind, message FROM sim_events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [{"ts": r[0], "slug": r[1], "kind": r[2], "message": r[3]} for r in rows]
+
+    def get_last_events(self) -> Dict[str, Dict[str, Any]]:
+        """Each collection's latest event (problems aside), however busy the others are."""
+        with self._conn() as conn:
+            rows = conn.execute("SELECT ts, slug, kind, message FROM sim_events WHERE id IN "
+                                "(SELECT MAX(id) FROM sim_events WHERE kind != 'problem' GROUP BY slug)").fetchall()
+        return {r[1]: {"ts": r[0], "slug": r[1], "kind": r[2], "message": r[3]} for r in rows}
 
     def log(self, slug: str, kind: str, message: str):
         with self._conn() as conn:

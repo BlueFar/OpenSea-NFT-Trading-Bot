@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..config.chains import currency_groups, gas_estimate, same_currency
+from ..metrics.floor_sales import _wash_keys
 from ..models.collection import SaleEvent
 from ..providers.opensea.client import OpenSeaNetworkError
 from ..trade_model.calculator import extract_fees_from_collection
@@ -189,6 +190,21 @@ def describe_position(pos: Dict[str, Any], exit_discount_pct: float) -> Dict[str
     return out
 
 
+def closing_trade(pos: Dict[str, Any], exit_discount_pct: float, now: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """A bought item taken out of the simulation, valued as if sold the discount under its last floor."""
+    entry, floor = pos.get("entry_price"), pos.get("floor")
+    if not entry or not floor or pos.get("fee_pct") is None:
+        return None
+    costs = Costs(pos["fee_pct"], pos.get("royalty_pct") or 0.0, pos.get("gas") or 0.0, exit_discount_pct)
+    exit_price = floor * (1 - exit_discount_pct / 100.0)
+    r = trade_result(entry, exit_price, costs)
+    return {"slug": pos["slug"], "round": pos.get("round"), "currency": pos.get("currency"),
+            "entry_price": entry, "entry_at": pos.get("entry_at"), "entry_tx": pos.get("entry_tx"),
+            "entry_token": pos.get("entry_token"), "exit_price": exit_price, "exit_at": int(now or time.time()),
+            "exit_tx": None, "fees": r["fees"], "gas": r["gas"], "net": r["net"], "roi_pct": r["roi_pct"],
+            "times_outbid": pos.get("times_outbid") or 0, "how": "removed"}
+
+
 # ----------------------------------------------------------------------
 # The simulator
 # ----------------------------------------------------------------------
@@ -265,23 +281,28 @@ class PaperTrader:
             "gas": gas_estimate(chain, currency, overrides=tm.chain_gas, ethereum_default=tm.gas_estimate_eth),
         })
 
-    def _order_kind(self, ev: SaleEvent, budget: List[int]) -> Optional[str]:
-        """'offer' or 'listing' from OpenSea's order for the sale (saved answers first). None = unknown."""
+    def _order(self, ev: SaleEvent, budget: List[int]) -> Tuple[Optional[str], Optional[str]]:
+        """
+        (kind, offer_type) from OpenSea's order for the sale, saved answers first. kind is "offer", "listing",
+        None (OpenSea can't say) or "pending" (no look-ups left this check: judge the sale at the next one).
+        """
         h = ev.order_hash
         if not h:
-            return None
+            return None, None
         cached = self.state_store.get_sale_orders([h]).get(h)
-        if cached and cached.get("kind") in ("offer", "listing"):
-            return cached["kind"]
+        if cached:
+            return (cached["kind"], cached.get("offer_type")) if cached.get("kind") in ("offer", "listing") else (None, None)
         get_order = getattr(self.provider, "get_order_info", None)
-        if get_order is None or not ev.protocol_address or not ev.chain or budget[0] <= 0:
-            return None
+        if get_order is None or not ev.protocol_address or not ev.chain:
+            return None, None
+        if budget[0] <= 0:
+            return "pending", None
         budget[0] -= 1
         info = get_order(ev.chain, ev.protocol_address, h)
-        info = info if isinstance(info, dict) else None
-        kind = (info or {}).get("kind") or "unknown"
-        self.state_store.set_sale_order(h, kind, (info or {}).get("offer_type"))
-        return kind if kind in ("offer", "listing") else None
+        info = info if isinstance(info, dict) else {}
+        kind, offer_type = info.get("kind") or "unknown", info.get("offer_type")
+        self.state_store.set_sale_order(h, kind, offer_type)
+        return (kind, offer_type) if kind in ("offer", "listing") else (None, None)
 
     def _step(self, pos: Dict[str, Any], now: int) -> None:
         slug, rev = pos["slug"], pos["rev"] or 0
@@ -297,9 +318,10 @@ class PaperTrader:
 
         p["note"] = None  # only a problem is kept here; a check that gets this far has none
 
-        stats = self.provider.get_collection_stats(slug)
+        stats = self.provider.get_collection_stats(slug, max_age=60.0)  # a fresh floor, not the evaluator's
         floor = stats.floor_price if stats and stats.floor_price and stats.floor_price > 0 else None
-        currency = p.get("currency") or (stats.floor_price_symbol if stats else None)
+        # The coin is fixed from the first real floor (OpenSea's stats say "ETH" when there is no floor)
+        currency = p.get("currency") or (stats.floor_price_symbol if floor else None)
         if currency is None:
             raise SimDataError("No floor price from OpenSea yet. Trying again at the next check.")
         if p.get("fee_pct") is None or p.get("round_started_at") is None:
@@ -311,40 +333,17 @@ class PaperTrader:
         sold_now = False
         # 1. Real sales since the last check: would one of them have taken our offer, or bought our listing?
         if p.get("last_sale_check") is not None:
-            sales = self.provider.get_sale_events(
-                slug, after_timestamp=int(p["last_sale_check"]) - SALE_LOOKBACK_SECONDS, max_pages=3)
-            if sales is not None:
-                fresh = sorted((e for e in sales if e.event_id), key=lambda e: e.event_timestamp)
-                already = self.store.seen_sales(slug, (e.event_id for e in fresh))
-                round_ticks = self.store.get_ticks(slug, round_no=p["round"])
-                budget = [ORDER_LOOKUPS_PER_CHECK]
-                for ev in fresh:
-                    if ev.event_id in already:
-                        continue
-                    seen.append((slug, ev.event_id, ev.event_timestamp))
-                    already.add(ev.event_id)
-                    price = per_item_price(ev)
-                    if price is None or not same_currency(ev.price_currency, cur, groups):
-                        continue
-                    t = in_force(round_ticks, ev.event_timestamp)
-                    if p["status"] == "bidding" and t and t["phase"] == "bidding" and t["bid"]:
-                        if self._fills(ev, price, t["bid"], budget):
-                            p.update({"status": "holding", "entry_price": t["bid"], "entry_at": ev.event_timestamp,
-                                      "entry_tx": ev.transaction, "entry_token": ev.token_id,
-                                      "ask": None, "listed_at": None})
-                            say("filled", f"Offer filled: bought #{ev.token_id or '?'} for {fmt_price(t['bid'], cur)}. "
-                                          f"A seller sold one for {fmt_price(price, cur)}, less than our offer, "
-                                          f"so ours would have been taken.")
-                        elif price < t["bid"]:
-                            say("ignored", f"Ignored a sale at {fmt_price(price, cur)}: far below our offer and not "
-                                           f"an accepted offer (a private sale or transfer).")
-                    elif p["status"] == "holding" and t and t["phase"] == "holding" and t["ask"]:
-                        floor_then = t["floor"] or floor
-                        max_pct = self.config.filters.trading_frequency.floor_sale_max_pct
-                        if price >= t["ask"] and (not floor_then or price <= floor_then * max_pct / 100.0):
-                            self._sell(p, ev, price, t["ask"], costs, trades, say)
-                            round_ticks = []  # the next round has no prices yet
-                            sold_now = True
+            after = int(p["last_sale_check"]) - SALE_LOOKBACK_SECONDS
+            fetch_all = getattr(self.provider, "get_sale_events_since", None)
+            if fetch_all is not None:
+                sales, complete = fetch_all(slug, after_timestamp=after, max_pages=10)
+            else:
+                sales, complete = self.provider.get_sale_events(slug, after_timestamp=after, max_pages=10), True
+            if sales is not None:  # a failed download is retried whole at the next check
+                if not complete:
+                    say("problem", "More than 1,000 sales since the last check. Only the newest were read, so a "
+                                   "fill or sale may have been missed.")
+                sold_now = self._judge_sales(p, sales, floor, costs, groups, trades, seen, say)
                 p["last_sale_check"] = now
         else:
             p["last_sale_check"] = now
@@ -375,12 +374,69 @@ class PaperTrader:
         if not self.store.save_round(p, rev, events, ticks, trades, seen):
             logger.info("Simulation: %s was changed on the dashboard during the check; skipped this round.", slug)
 
-    def _fills(self, ev: SaleEvent, price: float, bid: float, budget: List[int]) -> bool:
+    def _judge_sales(self, p, sales: List[SaleEvent], floor, costs: Costs, groups, trades, seen, say) -> bool:
+        """Judges each real sale once, oldest first, against the offer or listing that stood at that moment."""
+        slug, cur = p["slug"], p["currency"]
+        fresh = sorted((e for e in sales if e.event_id), key=lambda e: e.event_timestamp)
+        already = self.store.seen_sales(slug, (e.event_id for e in fresh))
+        wash = _wash_keys(fresh)  # trading with yourself is not a market
+        round_ticks = self.store.get_ticks(slug, round_no=p["round"])
+        budget = [ORDER_LOOKUPS_PER_CHECK]
+        max_pct = self.config.filters.trading_frequency.floor_sale_max_pct
+        sold = False
+        for ev in fresh:
+            if ev.event_id in already:
+                continue
+            price = per_item_price(ev)
+            t = in_force(round_ticks, ev.event_timestamp)
+            pending = False
+            if price is None or ev.event_id in wash or t is None or not same_currency(ev.price_currency, cur, groups):
+                pass
+            # Only sales made while this offer stood: not before it went up, e.g. while Stopped
+            elif (p["status"] == "bidding" and t["phase"] == "bidding" and t["bid"]
+                  and ev.event_timestamp >= (p.get("round_started_at") or 0)):
+                verdict = self._fill_verdict(ev, price, t["bid"], budget)
+                pending = verdict == "pending"
+                if verdict == "fill":
+                    p.update({"status": "holding", "entry_price": t["bid"], "entry_at": ev.event_timestamp,
+                              "entry_tx": ev.transaction, "entry_token": ev.token_id, "ask": None, "listed_at": None})
+                    say("filled", f"Offer filled: bought #{ev.token_id or '?'} for {fmt_price(t['bid'], cur)}. "
+                                  f"A seller sold one for {fmt_price(price, cur)}, less than our offer, "
+                                  f"so ours would have been taken.")
+                elif verdict == "ignored":
+                    say("ignored", f"Ignored a sale at {fmt_price(price, cur)}: far below our offer, and OpenSea "
+                                   f"doesn't show it as an accepted offer (likely a private sale or transfer).")
+            elif (p["status"] == "holding" and t["phase"] == "holding" and t["ask"]
+                  and ev.event_timestamp >= (p.get("listed_at") or 0)):
+                ask = t["ask"]
+                # Ours is the cheapest listing only at or under the floor. Held at break-even above it, a sale
+                # counts once the floor has risen to our price (the cheaper listings were bought).
+                ref_floor = max(t["floor"] or 0.0, floor or 0.0)
+                cheapest = not ref_floor or ask <= ref_floor
+                # Far above the floor is a rare item's buyer, not a floor buyer
+                if price >= ask and cheapest and (not ref_floor or price <= ref_floor * max_pct / 100.0):
+                    kind, offer_type = self._order(ev, budget)
+                    pending = kind == "pending"
+                    # A seller accepting an offer for one particular item is not a buyer choosing a listing
+                    if not pending and not (kind == "offer" and offer_type in ("trait", "item")):
+                        self._sell(p, ev, price, ask, costs, trades, say)
+                        round_ticks = []  # the next round has no prices yet
+                        sold = True
+            if not pending:
+                seen.append((slug, ev.event_id, ev.event_timestamp))
+                already.add(ev.event_id)
+        return sold
+
+    def _fill_verdict(self, ev: SaleEvent, price: float, bid: float, budget: List[int]) -> str:
+        """fill, no, ignored (far below our offer and not an accepted offer) or pending (ask OpenSea next check)."""
         if price > bid:
-            return False
+            return "no"
         if price >= bid * NEAR_OFFER_PCT / 100.0:
-            return True
-        return self._order_kind(ev, budget) == "offer"
+            return "fill"
+        kind, _ = self._order(ev, budget)
+        if kind == "pending":
+            return "pending"
+        return "fill" if kind == "offer" else "ignored"
 
     def _sell(self, p, ev, price, ask, costs: Costs, trades, say) -> None:
         cur = p["currency"]
@@ -390,7 +446,7 @@ class PaperTrader:
             "entry_price": p["entry_price"], "entry_at": p["entry_at"], "entry_tx": p["entry_tx"],
             "entry_token": p["entry_token"], "exit_price": ask, "exit_at": ev.event_timestamp,
             "exit_tx": ev.transaction, "fees": r["fees"], "gas": r["gas"], "net": r["net"],
-            "roi_pct": r["roi_pct"], "times_outbid": p.get("times_outbid") or 0,
+            "roi_pct": r["roi_pct"], "times_outbid": p.get("times_outbid") or 0, "how": "sold",
         })
         held = fmt_duration(ev.event_timestamp - (p["entry_at"] or ev.event_timestamp))
         say("sold", f"Sold for {fmt_price(ask, cur)} after {held}: a buyer paid {fmt_price(price, cur)} for one. "
@@ -428,7 +484,9 @@ class PaperTrader:
             elif state == "alone":
                 say("placed", f"No other offers. Placed {fmt_price(bid, cur)}.")
         elif bid != prev:
-            if top is not None and top >= prev:
+            # Outbid = someone reached our offer when they were below it at the last check (not the floor moving)
+            prev_top = p.get("competitor_top")
+            if top is not None and top >= prev and (prev_top is None or prev_top < prev):
                 p["times_outbid"] = (p.get("times_outbid") or 0) + 1
             if state == "capped" and prev_state != "capped":
                 say("capped", f"Outbid: someone offered {fmt_price(top, cur)}, above our limit. Holding at "

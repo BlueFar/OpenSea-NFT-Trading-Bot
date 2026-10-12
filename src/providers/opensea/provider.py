@@ -83,9 +83,10 @@ class OpenSeaProvider(CollectionDataProvider):
             results.append(meta)
         return results
 
-    def get_collection_stats(self, slug: str) -> Optional[CollectionStats]:
+    def get_collection_stats(self, slug: str, max_age: float = 300.0) -> Optional[CollectionStats]:
+        """max_age: how old a cached answer may be, in seconds (the simulation wants a fresh floor)."""
         cache_key = f"stats:{slug}"
-        cached = self._get_cache(cache_key, ttl=300.0)
+        cached = self._get_cache(cache_key, ttl=max_age)
         if cached:
             return cached
 
@@ -180,6 +181,32 @@ class OpenSeaProvider(CollectionDataProvider):
                 break
 
         return all_events
+
+    def get_sale_events_since(self, slug: str, after_timestamp: int,
+                              max_pages: int = 10) -> Tuple[Optional[List[SaleEvent]], bool]:
+        """
+        Every sale after the timestamp, for code that must not miss one (the simulation).
+        OpenSea pages newest first. Returns (None, False) if any page fails, so the caller can retry the
+        whole window later; complete is False when pages were still left after max_pages.
+        """
+        events: List[SaleEvent] = []
+        next_cursor = None
+        seen_cursors = set()
+        for _ in range(max_pages):
+            params: Dict[str, Any] = {"event_type": "sale", "after": after_timestamp, "limit": 100}
+            if next_cursor:
+                if next_cursor in seen_cursors:
+                    return events, True
+                seen_cursors.add(next_cursor)
+                params["next"] = next_cursor
+            data = self.client.get(f"/api/v2/events/collection/{slug}", params=params)
+            if data is None:
+                return None, False
+            events.extend(parse_sale_events(data))
+            next_cursor = data.get("next")
+            if not next_cursor:
+                return events, True
+        return events, False
 
     def get_order_info(self, chain: str, protocol_address: str, order_hash: str) -> Optional[Dict[str, Optional[str]]]:
         """Whether a sale was a listing bought or an offer accepted (None = order not found or not readable)."""

@@ -16,7 +16,7 @@ from ..providers.opensea.provider import OpenSeaProvider
 from ..collectors.orchestrator import CollectionEvaluator
 from ..collectors.chain_volume import summarize as summarize_chain_volume
 from ..runtime import control, launchd
-from ..simulation.engine import describe_position
+from ..simulation.engine import closing_trade, describe_position
 from ..simulation.store import SimStore
 from ..runtime.control import BotProcessManager, PID_FILE, LOG_FILE, WORKSPACE_ROOT  # noqa: F401 (re-exported)
 from ..utils.logging import setup_logger
@@ -724,7 +724,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         cfg = self._sim_config()
         store = self._sim_store()
         discount = cfg.trade_model.target_sale_discount_from_floor_pct
-        positions = [describe_position(p, discount) for p in store.get_positions()]
+        last = store.get_last_events()
+        positions = [dict(describe_position(p, discount), last_event=last.get(p["slug"])) for p in store.get_positions()]
         since = int(time.time()) - 3 * 86400
         charts = {}
         for p in positions:
@@ -793,10 +794,15 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             store.add_position(slug)
             self._send_json({"success": True, "position": store.get_position(slug)})
             return
-        if store.get_position(slug) is None:
+        pos = store.get_position(slug)
+        if pos is None:
             self._send_json({"error": "That collection isn't in the simulation."}, status=404)
             return
-        self._send_json({"success": True, "position": store.set_status(slug, action)})
+        closing = None
+        if action == "remove" and pos["entry_price"] is not None:
+            # A bought item that never sold still counts: valued as if sold under today's floor
+            closing = closing_trade(pos, self._sim_config().trade_model.target_sale_discount_from_floor_pct)
+        self._send_json({"success": True, "position": store.set_status(slug, action, closing_trade=closing)})
 
     # ------------------------------------------------------------------
     # Logs

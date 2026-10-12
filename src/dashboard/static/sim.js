@@ -12,6 +12,12 @@
                        start: "c-muted", remove: "c-muted" };
   var data = null, busy = false;
 
+  // Offers sit 0.1% apart, so prices here show at least 4 significant digits (with the dollar value on hover)
+  function price(n, cur) {
+    if (!isNum(n)) return "–";
+    var d = n === 0 ? 2 : Math.min(8, Math.max(2, 3 - Math.floor(Math.log10(Math.abs(n)))));
+    return '<span class="usd" tabindex="0" data-amt="' + n + '" data-cur="' + esc(cur || "") + '">' + esc(fmt(n, d) + " " + (cur || "")) + "</span>";
+  }
   function pct(n, d) { return isNum(n) ? fmt(n, d == null ? 0 : d) + "%" : "–"; }
   function hours(sec) {
     if (!isNum(sec) || sec <= 0) return "–";
@@ -69,19 +75,19 @@
     var cur = p.currency || "", gapMin = data.min_profit_gap_pct;
     var kv;
     if (p.entry_price != null) {
-      kv = "<div><dt>Bought for</dt><dd>" + money(p.entry_price, cur) + "</dd></div>" +
-        "<div><dt>Listed at</dt><dd>" + (isNum(p.ask) ? money(p.ask, cur) : "–") + "</dd></div>" +
+      kv = "<div><dt>Bought for</dt><dd>" + price(p.entry_price, cur) + "</dd></div>" +
+        "<div><dt>Listed at</dt><dd>" + (isNum(p.ask) ? price(p.ask, cur) : "–") + "</dd></div>" +
         "<div><dt>Floor</dt><dd>" + money(p.floor, cur) + "</dd></div>" +
         '<div><dt title="If our listing sells, after OpenSea fee, royalty and gas">Profit at our price</dt><dd>' + profitHtml(p.ask_net, p.ask_roi_pct, cur) + "</dd></div>" +
         '<div><dt title="Selling ' + fmt(data.exit_discount_pct, 0) + '% under today\'s floor">At today\'s floor</dt><dd>' + profitHtml(p.now_net, p.now_roi_pct, cur) + "</dd></div>" +
-        '<div><dt>Break-even</dt><dd>' + money(p.break_even, cur) + "</dd></div>";
+        '<div><dt>Break-even</dt><dd>' + price(p.break_even, cur) + "</dd></div>";
     } else {
       var gapCls = isNum(p.gap_pct) ? (p.gap_pct >= gapMin - 0.05 ? "c-good" : "c-bad") : "";
-      kv = "<div><dt>Our offer</dt><dd>" + (isNum(p.bid) ? money(p.bid, cur) : "–") + "</dd></div>" +
-        "<div><dt>Best other offer</dt><dd>" + (isNum(p.competitor_top) ? money(p.competitor_top, cur) : '<span class="muted">none</span>') + "</dd></div>" +
+      kv = "<div><dt>Our offer</dt><dd>" + (isNum(p.bid) ? price(p.bid, cur) : "–") + "</dd></div>" +
+        "<div><dt>Best other offer</dt><dd>" + (isNum(p.competitor_top) ? price(p.competitor_top, cur) : '<span class="muted">none</span>') + "</dd></div>" +
         "<div><dt>Floor</dt><dd>" + money(p.floor, cur) + "</dd></div>" +
         '<div><dt title="How far the floor sits above our offer, royalty included. We stop raising below ' + fmt(gapMin, 0) + '%.">Spread at our offer</dt><dd class="' + gapCls + '">' + pct(p.gap_pct, 1) + "</dd></div>" +
-        '<div><dt title="The highest offer that keeps a ' + fmt(gapMin, 0) + '% spread">Our limit</dt><dd>' + (isNum(p.max_bid) ? money(p.max_bid, cur) : "–") + "</dd></div>" +
+        '<div><dt title="The highest offer that keeps a ' + fmt(gapMin, 0) + '% spread">Our limit</dt><dd>' + (isNum(p.max_bid) ? price(p.max_bid, cur) : "–") + "</dd></div>" +
         '<div><dt title="If it fills and sells ' + fmt(data.exit_discount_pct, 0) + '% under today\'s floor">Profit if it fills</dt><dd>' + profitHtml(p.est_net, p.est_roi_pct, cur) + "</dd></div>";
     }
     var meta = [N.chainName(p.chain)];
@@ -114,8 +120,6 @@
 
   function render() {
     var d = data, pos = d.positions || [], trades = d.trades || [], events = d.events || [];
-    var lastBy = {};
-    events.forEach(function (e) { if (!lastBy[e.slug] && e.kind !== "problem") lastBy[e.slug] = e; });
 
     // Banner
     var banner = "";
@@ -128,15 +132,26 @@
     var bidding = pos.filter(function (p) { return p.status === "bidding"; });
     var onTop = bidding.filter(function (p) { return p.bid_state === "top" || p.bid_state === "alone"; }).length;
     var holding = pos.filter(function (p) { return p.status === "holding" || (p.status === "stopped" && p.entry_price != null); });
-    var wins = trades.filter(function (t) { return t.net >= 0; }).length;
-    var total = sumUsd(trades, "net"), miss = Object.keys(total.missing);
-    var totalText = total.usd != null ? N.usd(total.usd) : miss.length ? "" : "–";
-    miss.forEach(function (c) { totalText += (totalText ? " + " : "") + N.moneyText(total.missing[c], c); });
+    var sold = trades.filter(function (t) { return t.how !== "removed"; });
+    var under = holding.filter(function (p) { return isNum(p.now_net) && p.now_net < 0; }).length;
+    // Results count bought items that haven't sold as if sold under today's floor: listings never go below
+    // break-even, so a losing round shows up as an item that doesn't sell, not as a losing sale.
+    var held = holding.map(function (p) { return { net: p.now_net, currency: p.currency }; });
+    function totalText(items) {
+      var t = sumUsd(items, "net"), miss = Object.keys(t.missing), txt = t.usd != null ? N.usd(t.usd) : "";
+      miss.forEach(function (c) { txt += (txt ? " + " : "") + N.moneyText(t.missing[c], c); });
+      return { text: txt || "–", usd: t.usd, any: t.usd != null || miss.length > 0 };
+    }
+    var all = totalText(trades.concat(held)), realised = totalText(trades), open = totalText(held);
+    var profitSub = !holding.length ? "after OpenSea fee, royalty and gas" :
+      (trades.length ? realised.text + " closed, " : "") + open.text + " on " + holding.length +
+      (holding.length === 1 ? " item" : " items") + " still held, valued at today's floor";
     $("simStats").innerHTML =
       '<div class="card stat"><span class="stat-label">Best offer held</span><span class="stat-value num">' + onTop + '</span><span class="stat-sub">of ' + bidding.length + " collections bidding</span></div>" +
       '<div class="card stat"><span class="stat-label">Offers filled</span><span class="stat-value num">' + (trades.length + holding.length) + '</span><span class="stat-sub">' + holding.length + " waiting to sell</span></div>" +
-      '<div class="card stat"><span class="stat-label">Sold</span><span class="stat-value num">' + trades.length + '</span><span class="stat-sub">' + (trades.length ? wins + " at a profit" : "no round trip yet") + "</span></div>" +
-      '<div class="card stat"><span class="stat-label">Profit so far</span><span class="stat-value num ' + (isNum(total.usd) && total.usd < 0 ? "c-bad" : trades.length ? "c-good" : "") + '">' + esc(totalText) + '</span><span class="stat-sub">after OpenSea fee, royalty and gas</span></div>';
+      '<div class="card stat"><span class="stat-label">Sold</span><span class="stat-value num">' + sold.length + '</span><span class="stat-sub">' +
+        (under ? under + (under === 1 ? " item" : " items") + " held below break-even" : sold.length ? "never below break-even" : "no round trip yet") + "</span></div>" +
+      '<div class="card stat"><span class="stat-label">Profit so far</span><span class="stat-value num ' + (isNum(all.usd) && all.usd < 0 ? "c-bad" : all.any ? "c-good" : "") + '">' + esc(all.text) + '</span><span class="stat-sub">' + esc(profitSub) + "</span></div>";
 
     // Rules in plain words, from the current settings
     $("simRules").innerHTML = '<div class="section-title"><h2>How it plays</h2><span>Checks every ' + fmt(d.interval_seconds / 60, 0) + " minutes</span></div>" +
@@ -144,19 +159,21 @@
       "<li><strong>Bid.</strong> One offer per collection, " + fmt(d.outbid_step_pct, 1) + "% above the best real offer, so it's the best offer at the smallest price. It follows other bidders up and down.</li>" +
       "<li><strong>Stop at the limit.</strong> We never offer so much that the floor is less than " + fmt(d.min_profit_gap_pct, 0) + "% above our offer (royalty included). If someone bids higher, we stay at that limit.</li>" +
       "<li><strong>Fill.</strong> When a real seller sells one for our offer or less, they would have taken ours instead, so we count it as bought at our offer.</li>" +
-      "<li><strong>Sell.</strong> We list it " + fmt(d.exit_discount_pct, 0) + "% under the floor (never below break-even) and count it sold when a real buyer pays that or more for a floor item." +
-      (d.repeat ? " Then we bid again." : "") + "</li></ol>";
+      "<li><strong>Sell.</strong> We list it " + fmt(d.exit_discount_pct, 0) + "% under the floor and count it sold when a real buyer pays that or more for a floor item." +
+      (d.repeat ? " Then we bid again." : "") + "</li>" +
+      "<li><strong>If the floor falls.</strong> We never list below break-even, so the item waits until the floor recovers. Profit so far counts it as if sold under today's floor, so a loss still shows.</li></ol>";
 
     // Cards
-    $("simGrid").innerHTML = pos.length ? pos.map(function (p) { return card(p, lastBy[p.slug]); }).join("") :
+    $("simGrid").innerHTML = pos.length ? pos.map(function (p) { return card(p, p.last_event); }).join("") :
       '<div class="card empty"><h3>No collections yet</h3>Add one below, or list them under <code>simulation: collections</code> in config/config.yaml.</div>';
 
     // Trades
     $("simTradesSub").textContent = trades.length ? trades.length + (trades.length === 1 ? " round trip" : " round trips") : "Bought and sold";
     $("simTrades").innerHTML = trades.length ? '<div class="tbl-scroll"><table class="tbl sim-trades"><thead><tr><th>Collection</th><th>Bought</th><th>Sold</th><th>Held</th><th>Profit</th></tr></thead><tbody>' +
       trades.map(function (t) {
-        return "<tr><td>" + osLink(t.slug, t.name) + '<div class="sub">' + esc(N.fmtDay(t.exit_at)) + "</div></td><td>" + money(t.entry_price, t.currency) +
-          "</td><td>" + money(t.exit_price, t.currency) + "</td><td>" + esc(hours(t.hold_seconds)) + "</td><td>" + profitHtml(t.net, t.roi_pct, t.currency) + "</td></tr>";
+        return "<tr><td>" + osLink(t.slug, t.name) + '<div class="sub">' + esc(N.fmtDay(t.exit_at)) +
+          (t.how === "removed" ? " · removed, valued at the floor" : "") + "</div></td><td>" + price(t.entry_price, t.currency) +
+          "</td><td>" + price(t.exit_price, t.currency) + "</td><td>" + esc(hours(t.hold_seconds)) + "</td><td>" + profitHtml(t.net, t.roi_pct, t.currency) + "</td></tr>";
       }).join("") + "</tbody></table></div>" :
       '<p class="chart-note" style="margin-top:0">None yet. A round trip needs a seller to hit our offer, then a buyer to take our listing.</p>';
 
@@ -179,7 +196,7 @@
   $("simGrid").addEventListener("click", function (e) {
     var b = e.target.closest("button[data-act]"); if (!b) return;
     var act = b.getAttribute("data-act"), slug = b.getAttribute("data-slug");
-    if (act === "remove" && !window.confirm("Remove " + (b.getAttribute("data-name") || slug) + " from the simulation? Its trades stay in the history.")) return;
+    if (act === "remove" && !window.confirm("Remove " + (b.getAttribute("data-name") || slug) + " from the simulation? Its trades stay in the history, and an item it bought is counted as sold under today's floor.")) return;
     b.disabled = true;
     N.post("/api/simulation/" + act, { slug: slug }).then(function () {
       N.toast(act === "stop" ? "Stopped." : act === "start" ? "Started. The bot picks it up at its next check." : "Removed.");
