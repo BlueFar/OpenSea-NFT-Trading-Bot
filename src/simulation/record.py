@@ -59,12 +59,20 @@ def track_record(pos: Dict[str, Any], trades: List[Dict[str, Any]], exit_discoun
         verdict = "not_yet"
         if not fills:
             why = f"no fill yet ({bid_days:.1f} days of bidding)"
+        elif losses:
+            why = (f"{len(losses)} of {len(trades)} trades lost money, "
+                   f"{'up' if (total or 0) >= 0 else 'down'} {fmt_price(abs(total or 0), cur)} overall")
         elif not sold:
-            why = f"holding its first item ({held_days:.1f} days)" if held_days is not None else "first item bought"
-            if open_net is not None and open_net < 0:
-                why += f", down {fmt_price(abs(open_net), cur)} at today's floor"
+            if holding:
+                why = f"holding its first item ({held_days:.1f} days)" if held_days is not None else "first item bought"
+            else:
+                why = f"{len(trades)} item{'s' if len(trades) != 1 else ''} bought, none sold yet"
+        elif len(sold) >= MIN_SALES_PROVEN:
+            why = f"{len(sold)} profitable sales, but the item held puts it down overall"
         else:
-            why = f"{len(sold)} profitable sale{'s' if len(sold) != 1 else ''} so far; proven after {MIN_SALES_PROVEN}"
+            why = f"{len(sold)} profitable sale so far; proven after {MIN_SALES_PROVEN}"
+        if holding and open_net is not None and open_net < 0 and "down" not in why:
+            why += f"; the item held is down {fmt_price(abs(open_net), cur)} at today's floor"
 
     return {
         "verdict": verdict,

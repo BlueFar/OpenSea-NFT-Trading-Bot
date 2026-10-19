@@ -986,6 +986,13 @@ def test_track_record_verdicts():
     one = track_record(base, [sale(0.03, 50.0, 2)], 5.0, now)
     assert one["verdict"] == "not_yet" and "proven after 2" in one["why"]
     assert track_record(base, [sale(0.03, 50.0, 2), sale(-0.04, -40.0, 3, how="removed")], 5.0, now)["verdict"] == "losing"
+    # A losing sale inside an overall profit: never proven, and the reason says so
+    r = track_record(base, [sale(0.5, 50.0, 2), sale(0.5, 50.0, 2), sale(-0.1, -10.0, 2)], 5.0, now)
+    assert r["verdict"] == "not_yet" and r["why"].startswith("1 of 3 trades lost money, up 0.9")
+    # Two good sales outweighed by a fresh item under water
+    fresh = {**base, "status": "holding", "entry_price": 0.2, "entry_at": now - 3600}
+    r = track_record(fresh, [sale(0.01, 20.0, 1), sale(0.01, 20.0, 1)], 5.0, now)
+    assert r["verdict"] == "not_yet" and "puts it down overall" in r["why"]
 
     # Holding an item now worth less than it cost: not judged for a few days, then losing
     held = {**base, "status": "holding", "entry_price": 0.1, "entry_at": now - 86400, "ask": 0.11}
