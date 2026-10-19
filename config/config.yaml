@@ -123,8 +123,15 @@ simulation:
     chicken-derby: "Live game with new skins and tournaments in Aug 2026. Its Discord invite is dead."
   interval_seconds: 900             # Check offers, floor and sales this often (runs inside the bot; the
                                     # Simulation page can change it)
+  contested_interval_seconds: 300   # A collection where we were outbid in the last day: check this often
+  quiet_interval_seconds: 1800      # Best offer held unchallenged for a day: check only this often
   include_candidates: true          # Also simulate every collection on the Candidates page. One that stops
-                                    # passing stops bidding; an item already bought is still sold.
+                                    # passing leaves the simulation (after selling anything bought).
   min_profit_gap_pct: 40.0          # Stop outbidding below this spread; hold at the limit instead
   outbid_step_pct: 0.1              # Beat the best offer by this much, rounded up to 4 significant digits
   repeat: true                      # After a sale, place a new offer and go again
+  strategy_b:                       # A second set of virtual offers on the same collections, to compare:
+    enabled: true                   # its limit starts at min_profit_gap_pct and steps down while capped
+    step_pct: 5.0                   # Lower the limit by this many points at a time...
+    every_hours: 24.0               # ...after this long held at the limit with no fill
+    lowest_gap_pct: 25.0            # Never below this. After a sale it steps back up by step_pct.

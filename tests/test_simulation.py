@@ -9,6 +9,7 @@ import yaml
 from src.config.settings import load_config
 from src.models.collection import CollectionMetadata, CollectionStats, Contract, Fee, Offer, SaleEvent
 from src.simulation.engine import (
+    ORDER_LOOKUPS_PER_CHECK, Book, MarketView,
     Costs, PaperTrader, break_even_ask, decide_bid, describe_position, gap_pct, max_bid_for_gap,
     outbid_price, round_down, target_ask, trade_result,
 )
@@ -117,6 +118,7 @@ def _trader(tmp_path, market, **sim):
     cfg.simulation.collections = ["kongz"]
     cfg.simulation.final_list = {}
     cfg.simulation.include_candidates = False
+    cfg.simulation.strategy_b.enabled = False  # strategy B has its own tests
     for k, v in sim.items():
         setattr(cfg.simulation, k, v)
     state = StateStore(cfg.general.state_db_path)
@@ -235,7 +237,7 @@ def test_stop_pressed_during_a_check_is_not_overwritten(tmp_path):
     stale = trader.store.get_position("kongz")
     trader.store.set_status("kongz", "stop")       # pressed on the dashboard mid-check
     m.top = 0.0610
-    trader._step(stale, t0 + 300)
+    trader._step(Book("A", trader.store), stale, t0 + 300, MarketView(m, "kongz"))
     p = trader.store.get_position("kongz")
     assert p["status"] == "stopped" and p["bid"] == 0.05966
     trader.tick(now=t0 + 600)                      # stopped positions are left alone
@@ -464,7 +466,7 @@ def test_a_sale_waiting_for_an_order_look_up_is_judged_at_the_next_check(tmp_pat
     trader, _ = _trader(tmp_path, m)
     t0 = int(time.time()) - 20000
     trader.tick(now=t0)
-    for i in range(5):                              # five private sales use up this check's look-ups
+    for i in range(ORDER_LOOKUPS_PER_CHECK):        # private sales use up this check's look-ups
         m.sale(t0 + 100 + i, 0.01, order_hash=f"0xp{i}")
         m.orders[f"0xp{i}"] = {"kind": "listing", "offer_type": None}
     m.sale(t0 + 200, 0.03, order_hash="0xbid")      # a seller accepted a low collection offer
@@ -688,3 +690,224 @@ def test_dashboard_final_list_and_interval(tmp_path):
         status, r = _call("POST", "/api/simulation/settings", env, {"interval_minutes": 5})
         assert status == 200 and r["interval_seconds"] == 300
         assert load_config(str(cfg_path)).simulation.interval_seconds == 300
+
+
+# ----------------------------------------------------------------------
+# Strategy B, missed fills and check timing
+# ----------------------------------------------------------------------
+def _trader_b(tmp_path, market, **sim):
+    trader, state = _trader(tmp_path, market, **sim)
+    trader.sim.strategy_b.enabled = True
+    return trader, state
+
+
+def test_strategy_b_steps_its_limit_down_while_capped_and_back_up_after_a_sale(tmp_path):
+    m = FakeMarket()
+    t, _ = _trader_b(tmp_path, m)
+    t0 = int(time.time()) - 10 * 86400
+    t.tick(now=t0)
+    a, b = t.store.get_position("kongz"), t.store_b.get_position("kongz")
+    assert a["bid"] == b["bid"] == 0.05966
+
+    m.top = 0.09                                   # above every limit B can reach
+    t.tick(now=t0 + 300)
+    assert t.store_b.get_position("kongz")["capped_since"] == t0 + 300
+    t.tick(now=t0 + 300 + 23 * 3600)               # not a full day at the limit yet
+    assert t.store_b.get_position("kongz")["limit_pct"] is None
+    day = t0 + 300 + 86400
+    for i, gap in enumerate((35.0, 30.0, 25.0, 25.0)):
+        t.tick(now=day + i * 86400)
+        b = t.store_b.get_position("kongz")
+        assert b["limit_pct"] == gap and b["bid_state"] == "capped"
+        assert b["bid"] == round_down(max_bid_for_gap(0.1088, COSTS, gap))
+    a = t.store.get_position("kongz")
+    assert a["limit_pct"] is None and a["bid"] == round_down(max_bid_for_gap(0.1088, COSTS, 40.0))
+    assert [e["kind"] for e in t.store_b.get_events()].count("stepdown") == 3
+
+    # A seller takes 0.08: under B's 25% offer, above A's 40% limit
+    now = day + 4 * 86400
+    m.sale(now - 600, 0.08)
+    t.tick(now=now)
+    b, a = t.store_b.get_position("kongz"), t.store.get_position("kongz")
+    assert b["status"] == "holding" and b["entry_price"] == round_down(max_bid_for_gap(0.1088, COSTS, 25.0))
+    assert a["status"] == "bidding"
+
+    m.sale(now + 100, 0.11)                        # a buyer takes B's listing
+    t.tick(now=now + 300)
+    b = t.store_b.get_position("kongz")
+    assert b["status"] == "bidding" and b["round"] == 2 and b["limit_pct"] == 30.0 and b["capped_since"] is None
+    [trade] = t.store_b.get_trades()
+    assert trade["net"] > 0 and t.store.get_trades() == []
+    assert t.store_b.get_events()[0]["kind"] == "stepup"
+
+
+def test_strategy_b_steps_down_only_after_a_full_day_at_the_limit(tmp_path):
+    m = FakeMarket()
+    t, _ = _trader_b(tmp_path, m)
+    t0 = int(time.time()) - 5 * 86400
+    t.tick(now=t0)
+    m.top = 0.09
+    t.tick(now=t0 + 300)
+    m.top = 0.06                                   # back on top: the day at the limit starts over
+    t.tick(now=t0 + 3600)
+    assert t.store_b.get_position("kongz")["capped_since"] is None
+    m.top = 0.09
+    t.tick(now=t0 + 7200)
+    t.tick(now=t0 + 300 + 86400)                   # a day after the first cap, but not a day in a row
+    assert t.store_b.get_position("kongz")["limit_pct"] is None
+    t.tick(now=t0 + 7200 + 86400)
+    assert t.store_b.get_position("kongz")["limit_pct"] == 35.0
+
+
+def test_strategy_b_follows_strategy_a_and_the_trial(tmp_path):
+    m, t, state, t0 = _holding(tmp_path, collections=[], include_candidates=True, final_list={"kongz": "pick"})
+    t.sim.strategy_b.enabled = True
+    t.seed(now=t0 + 310)                            # B joins with the collections A already has
+    assert t.store_b.get_position("kongz")["status"] == "bidding"
+    m.sale(t0 + 400, 0.05)
+    t.tick(now=t0 + 450)                            # B's first offer, then its first fill
+    m.sale(t0 + 500, 0.059)
+    t.tick(now=t0 + 600)
+    assert t.store_b.get_position("kongz")["status"] == "holding"
+
+    _passing(state, "kongz", passes=False)
+    t.seed(now=t0 + 700)
+    with sqlite3.connect(state.db_path) as c:      # both items now worth a loss
+        c.execute("UPDATE sim_positions SET floor=0.06 WHERE slug='kongz'")
+        c.execute("UPDATE simb_positions SET floor=0.06 WHERE slug='kongz'")
+    t.seed(now=t0 + 700 + 7 * 86400)               # trial failed: gone from both, items valued at the floor
+    assert t.store.get_position("kongz")["status"] == "removed"
+    assert t.store_b.get_position("kongz")["status"] == "removed"
+    assert [x["how"] for x in t.store_b.get_trades()] == ["removed"]
+
+
+def test_missed_fills_are_counted_within_and_above_our_limit(tmp_path):
+    m = FakeMarket()
+    t, _ = _trader(tmp_path, m)
+    t0 = int(time.time()) - 20000
+    t.tick(now=t0)                                 # our offer 0.05966, limit ~0.0725, floor 0.1088
+    for h, kind, offer_type in (("0xa", "offer", "collection"), ("0xb", "offer", "collection"),
+                                ("0xc", "offer", "item"), ("0xd", "listing", None)):
+        m.orders[h] = {"kind": kind, "offer_type": offer_type}
+    m.sale(t0 + 100, 0.065, order_hash="0xa")      # someone else's collection offer, within our limit
+    m.sale(t0 + 110, 0.08, order_hash="0xb")       # ... above our limit
+    m.sale(t0 + 120, 0.07, order_hash="0xc")       # an offer on one particular item
+    m.sale(t0 + 130, 0.07, order_hash="0xd")       # a cheap listing
+    m.sale(t0 + 140, 0.12, order_hash="0xe")       # above the floor: a listing, not looked up
+    t.tick(now=t0 + 300)
+    p = t.store.get_position("kongz")
+    assert (p["missed_fills"], p["missed_above_limit"], p["status"]) == (1, 1, "bidding")
+    assert m.order_lookups == 4
+    assert [e["kind"] for e in t.store.get_events()].count("missed") == 2
+    t.tick(now=t0 + 600)                           # the same sales aren't counted twice
+    assert t.store.get_position("kongz")["missed_fills"] == 1
+
+
+def test_check_timing_follows_how_contested_a_collection_is(tmp_path):
+    from src.simulation.engine import check_interval
+    sim = load_config("config/config.yaml").simulation
+    now = 10 ** 9
+    day = 86400
+    assert check_interval({"status": "bidding", "last_outbid_at": now - 100}, sim, now) == 300
+    assert check_interval({"status": "bidding", "bid_state": "top", "round_started_at": now - 2 * day}, sim, now) == 1800
+    assert check_interval({"status": "bidding", "bid_state": "top", "round_started_at": now - 3600}, sim, now) == 900
+    assert check_interval({"status": "bidding", "bid_state": "capped", "round_started_at": now - 2 * day}, sim, now) == 900
+    assert check_interval({"status": "bidding", "bid_state": "alone", "last_outbid_at": now - 2 * day,
+                           "round_started_at": now - 3 * day}, sim, now) == 1800
+    assert check_interval({"status": "holding", "last_outbid_at": now - 100}, sim, now) == 900
+
+    m = FakeMarket()
+    t, _ = _trader(tmp_path, m)
+    assert t.tick_every() == 300
+    t0 = int(time.time()) - 20000
+    assert t.tick(now=t0, only_due=True) == 1
+    assert t.tick(now=t0 + 300, only_due=True) == 0          # nobody outbid us: every 15 minutes
+    m.top = 0.0610
+    assert t.tick(now=t0 + 850, only_due=True) == 1
+    assert t.store.get_position("kongz")["last_outbid_at"] == t0 + 850
+    assert t.tick(now=t0 + 950, only_due=True) == 0
+    assert t.tick(now=t0 + 1100, only_due=True) == 1         # outbid lately: every 5 minutes
+
+
+def test_both_strategies_share_one_read_of_the_market(tmp_path):
+    m = FakeMarket()
+    t, _ = _trader_b(tmp_path, m)
+    calls = {"sales": 0, "stats": 0}
+    real_sales, real_stats = m.get_sale_events, m.get_collection_stats
+
+    def sales(*a, **kw):
+        calls["sales"] += 1
+        return real_sales(*a, **kw)
+
+    def stats(*a, **kw):
+        calls["stats"] += 1
+        return real_stats(*a, **kw)
+
+    m.get_sale_events, m.get_collection_stats = sales, stats
+    t0 = int(time.time()) - 20000
+    t.tick(now=t0)
+    calls.update(sales=0, stats=0)
+    m.sale(t0 + 100, 0.0596)
+    assert t.tick(now=t0 + 300) == 1
+    assert calls == {"sales": 1, "stats": 1}
+    assert t.store.get_position("kongz")["status"] == t.store_b.get_position("kongz")["status"] == "holding"
+
+
+def test_older_databases_get_strategy_b_and_the_contested_columns(tmp_path):
+    from src.simulation.store import POSITION_COLUMNS
+    db = str(tmp_path / "old.db")
+    new = {"last_outbid_at", "missed_fills", "missed_above_limit", "limit_pct", "capped_since"}
+    old_cols = [c for c in POSITION_COLUMNS if c not in new]  # the live database before strategy B
+    with sqlite3.connect(db) as c:
+        c.execute(f"CREATE TABLE sim_positions ({', '.join(old_cols)}, PRIMARY KEY (slug))")
+        c.execute("INSERT INTO sim_positions (slug, status, times_outbid, last_tick_at) VALUES ('a', 'bidding', 2, 111)")
+        c.execute("INSERT INTO sim_positions (slug, status, times_outbid, last_tick_at) VALUES ('b', 'bidding', 0, 222)")
+    a = SimStore(db)
+    assert a.get_position("a")["last_outbid_at"] == 111 and a.get_position("b")["last_outbid_at"] is None
+    assert a.get_position("a")["missed_fills"] == 0
+    b = SimStore(db, strategy="B")
+    assert b.get_positions() == [] and a.get_position("a")["status"] == "bidding"
+    b.add_position("a")
+    assert b.get_position("a")["status"] == "bidding" and a.get_position("a")["times_outbid"] == 2
+    with sqlite3.connect(db) as c:
+        tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"simb_positions", "simb_ticks", "simb_trades", "simb_events"} <= tables
+
+
+def test_dashboard_shows_and_controls_both_strategies(tmp_path):
+    from src.dashboard.server import DashboardRequestHandler
+    env = _dash_env(tmp_path)
+    cfg_path, cfg, store, ev = env
+    assert cfg.simulation.strategy_b.enabled
+    DashboardRequestHandler.sim_store = DashboardRequestHandler.sim_store_b = None
+    with patch.object(DashboardRequestHandler, "config", cfg, create=True), \
+         patch.object(DashboardRequestHandler, "evaluator", ev, create=True):
+        assert _call("POST", "/api/simulation/add", env, {"slug": "smol-brains"})[0] == 200
+        a, b = SimStore(cfg.general.state_db_path), SimStore(cfg.general.state_db_path, strategy="B")
+        assert a.get_position("smol-brains")["status"] == b.get_position("smol-brains")["status"] == "bidding"
+        pos = b.get_position("smol-brains")
+        pos.update({"currency": "ETH", "fee_pct": 1.0, "royalty_pct": 5.0, "gas": 0.0002, "floor": 0.005,
+                    "bid": 0.0034, "bid_state": "capped", "limit_pct": 30.0, "missed_fills": 2})
+        assert b.save_round(pos, pos["rev"], events=[(int(time.time()), "smol-brains", "stepdown", "Limit to 30%.")])
+
+        status, r = _call("GET", "/api/simulation", env)
+        [p] = r["positions"]
+        assert status == 200 and r["strategy_b"]["enabled"] and r["strategy_b"]["lowest_gap_pct"] == 25.0
+        assert p["b"]["limit_pct"] == 30.0 and p["b"]["bid"] == 0.0034 and p["b"]["missed_fills"] == 2
+        assert p["check_every"] == cfg.simulation.interval_seconds
+        assert r["contested_interval_seconds"] == 300 and r["quiet_interval_seconds"] == 1800
+        assert any(e["strategy"] == "B" and e["kind"] == "stepdown" for e in r["events"])
+        assert not any(e["strategy"] == "B" and e["kind"] == "added" for e in r["events"])
+
+        assert _call("POST", "/api/simulation/stop", env, {"slug": "smol-brains"})[0] == 200
+        assert a.get_position("smol-brains")["status"] == b.get_position("smol-brains")["status"] == "stopped"
+        assert _call("POST", "/api/simulation/start", env, {"slug": "smol-brains"})[0] == 200
+        assert b.get_position("smol-brains")["status"] == "bidding"
+
+        assert _call("POST", "/api/final/add", env, {"slug": "smol-brains"})[0] == 200
+        [item] = _call("GET", "/api/final", env)[1]["items"]
+        assert item["b"]["status"] == "bidding" and item["b"]["trades"] == 0 and "limit_pct" in item["b"]
+        assert item["missed_fills"] == 0
+
+        assert _call("POST", "/api/simulation/remove", env, {"slug": "smol-brains"})[0] == 200
+        assert a.get_position("smol-brains")["status"] == b.get_position("smol-brains")["status"] == "removed"

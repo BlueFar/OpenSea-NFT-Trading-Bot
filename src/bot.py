@@ -179,11 +179,12 @@ class NFTBot:
         return n
 
     def _maybe_run_simulation(self) -> None:
-        """Paper trading (Simulation page): checks its offers and listings every simulation.interval_seconds."""
+        """Paper trading (Simulation page): checks each collection when due (see PaperTrader.interval_for)."""
         sim = self.config.simulation
         if not sim.enabled:
             return
-        if time.time() - self._last_sim_time < sim.interval_seconds:
+        # Runs as often as the most urgent collection needs; each run checks only the collections that are due
+        if time.time() - self._last_sim_time < self.simulator.tick_every():
             try:  # between rounds, still follow the Candidates page as each collection check lands
                 self.simulator.seed()
             except Exception as e:
@@ -191,7 +192,7 @@ class NFTBot:
             return
         self._last_sim_time = time.time()
         try:
-            n = self.simulator.tick(keep_running=lambda: self._running)
+            n = self.simulator.tick(keep_running=lambda: self._running, only_due=True)
             if n:
                 logger.info("Simulation: checked %d collection(s).", n)
         except OpenSeaNetworkError as e:

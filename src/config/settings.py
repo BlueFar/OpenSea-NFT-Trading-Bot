@@ -134,17 +134,28 @@ class RuntimeConfig(BaseModel):
     notification_sound: bool = False
     ipv4_only: bool = True                    # Connect to OpenSea over IPv4 only (broken home IPv6 stalls every call)
 
+class StrategyBConfig(BaseModel):
+    """A second set of virtual offers, judged on the same market data: its profit limit steps down while capped."""
+    enabled: bool = True
+    step_pct: float = Field(5.0, gt=0)          # Lower the limit by this much at a time...
+    every_hours: float = Field(24.0, gt=0)      # ...after this long held at the limit without a fill
+    lowest_gap_pct: float = Field(25.0, ge=0)   # Never below this; after a sale it steps back up by step_pct
+
+
 class SimulationConfig(BaseModel):
     """Paper trading: hold the best offer on these collections and sell what fills just under the floor."""
     enabled: bool = True
     collections: List[str] = Field(default_factory=list)  # OpenSea collection slugs
     interval_seconds: int = Field(900, ge=60)           # How often offers, floor and sales are checked
+    contested_interval_seconds: int = Field(300, ge=60)  # Collections outbid in the last day: check this often
+    quiet_interval_seconds: int = Field(1800, ge=60)     # Holding the best offer unchallenged for a day: this often
     include_candidates: bool = True                      # Also simulate every collection on the Candidates page
     final_list: Dict[str, str] = Field(default_factory=dict)  # Final list to start with: slug -> why it passed
     min_profit_gap_pct: float = 40.0                     # Stop outbidding when the floor would be less than this
                                                          # far above our offer (royalty included)
     outbid_step_pct: float = Field(0.1, gt=0)            # Beat the best offer by this much (then rounded up)
     repeat: bool = True                                  # After selling, place a new offer
+    strategy_b: StrategyBConfig = Field(default_factory=StrategyBConfig)
 
 class BotConfig(BaseModel):
     general: GeneralConfig = Field(default_factory=GeneralConfig)

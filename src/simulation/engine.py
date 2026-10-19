@@ -10,6 +10,10 @@ sales for each collection, then:
   than ours, so ours would have been taken: the offer fills at our price.
 - Holding: lists the item the trade model's discount under the floor (never below break-even) and follows the
   floor. A real buyer paying at least our price for a floor item would have bought ours: it sells at our price.
+
+Two strategies run side by side on the same market data (one set of OpenSea calls): A keeps the fixed
+min_profit_gap_pct limit; B starts there and lowers its limit step by step while it sits capped without a fill.
+Collections where we were outbid in the last day are checked more often, quiet ones less often.
 """
 import math
 import time
@@ -33,8 +37,13 @@ NEAR_OFFER_PCT = 90.0
 OPENING_BID_PCT = 50.0
 # OpenSea can report a sale a few minutes late, so each check looks back this far (each sale is judged once)
 SALE_LOOKBACK_SECONDS = 1800
-# At most this many "was it an accepted offer?" OpenSea look-ups per collection per check
-ORDER_LOOKUPS_PER_CHECK = 5
+# At most this many "was it an accepted offer?" OpenSea look-ups per collection per check (answers are saved,
+# so strategy B reuses A's)
+ORDER_LOOKUPS_PER_CHECK = 8
+# "Contested" = outbid within this long; "quiet" = holding the best offer unchallenged for this long
+CONTESTED_WINDOW_SECONDS = 86400
+# A check may run this much early (the bot's loop doesn't land exactly on time)
+DUE_SLACK_SECONDS = 60
 # Prices are rounded to this many significant digits (offers up, limits down)
 PRICE_DIGITS = 4
 
@@ -215,16 +224,104 @@ class SimDataError(Exception):
 TRIAL_DAYS = 7  # longest a Final list pick that stopped passing gets to finish its trial round
 
 
+def check_interval(pos: Dict[str, Any], sim, now: int) -> int:
+    """
+    How often a position is checked, in seconds: contested_interval_seconds while someone outbid us in the last
+    day, quiet_interval_seconds once we've held the best offer unchallenged for a day, interval_seconds otherwise
+    (and always while holding an item).
+    """
+    base = sim.interval_seconds
+    if pos.get("status") == "bidding":
+        outbid = pos.get("last_outbid_at")
+        if outbid and now - outbid < CONTESTED_WINDOW_SECONDS:
+            return min(base, sim.contested_interval_seconds)
+        started = pos.get("round_started_at")
+        if pos.get("bid_state") in ("top", "alone") and started and now - started >= CONTESTED_WINDOW_SECONDS:
+            return max(base, sim.quiet_interval_seconds)
+    return base
+
+
+class MarketView:
+    """One collection's market at one check, read once from OpenSea and shared by both strategies."""
+
+    def __init__(self, provider, slug: str):
+        self.provider, self.slug = provider, slug
+        self._memo: Dict[Any, Any] = {}
+        self._sales: Optional[List[SaleEvent]] = None
+        self._sales_after: Optional[int] = None
+        self._sales_complete = True
+
+    def _get(self, key, fetch):
+        if key not in self._memo:
+            self._memo[key] = fetch()
+        return self._memo[key]
+
+    def stats(self):
+        return self._get("stats", lambda: self.provider.get_collection_stats(self.slug, max_age=60.0))
+
+    def collection(self):
+        return self._get("collection", lambda: self.provider.get_collection(self.slug))
+
+    def top_offer(self, currency: str, groups):
+        return self._get(("top", currency), lambda: self.provider.get_top_offer(
+            self.slug, currency_filter=lambda c: same_currency(c, currency, groups)))
+
+    def sales(self, after: int) -> Tuple[Optional[List[SaleEvent]], bool]:
+        """Sales at or after `after`, and whether the download was complete. None = it failed (retry next check)."""
+        if self._sales is None or self._sales_after is None or after < self._sales_after:
+            fetch_all = getattr(self.provider, "get_sale_events_since", None)
+            if fetch_all is not None:
+                sales, complete = fetch_all(self.slug, after_timestamp=after, max_pages=10)
+            else:
+                sales, complete = self.provider.get_sale_events(self.slug, after_timestamp=after, max_pages=10), True
+            if sales is None:
+                return None, False
+            self._sales, self._sales_after, self._sales_complete = list(sales), after, complete
+        return [e for e in self._sales if e.event_timestamp >= after], self._sales_complete
+
+
+@dataclass
+class Book:
+    """One strategy's positions: A (fixed limit, the main results) or B (stepped-down limit)."""
+    strategy: str
+    store: SimStore
+
+
 class PaperTrader:
     def __init__(self, provider, state_store, config, sim_store: Optional[SimStore] = None):
         self.provider = provider
         self.state_store = state_store
         self.config = config
         self.store = sim_store or SimStore(config.general.state_db_path)
+        self.store_b = SimStore(self.store.db_path, strategy="B")
 
     @property
     def sim(self):
         return self.config.simulation
+
+    def books(self) -> List[Book]:
+        books = [Book("A", self.store)]
+        if self.sim.strategy_b.enabled:
+            books.append(Book("B", self.store_b))
+        return books
+
+    def gap_for(self, book: Book, p: Dict[str, Any]) -> float:
+        """The profit limit this offer works to: fixed for A, B's own (stepped-down) one for B."""
+        if book.strategy == "B" and p.get("limit_pct") is not None:
+            return float(p["limit_pct"])
+        return float(self.sim.min_profit_gap_pct)
+
+    def interval_for(self, pos: Dict[str, Any], now: int) -> int:
+        return check_interval(pos, self.sim, now)
+
+    def tick_every(self) -> int:
+        """How often the bot should run tick(only_due=True): the shortest interval any position can have."""
+        sim = self.sim
+        return max(60, min(sim.interval_seconds, sim.contested_interval_seconds))
+
+    def is_due(self, pos: Dict[str, Any], now: int) -> bool:
+        last = pos.get("last_tick_at")
+        return last is None or now - last >= self.interval_for(pos, now) - DUE_SLACK_SECONDS
 
     def seed(self, now: Optional[int] = None) -> None:
         """
@@ -241,6 +338,14 @@ class PaperTrader:
         if self.sim.final_list:
             self.store.seed_final(self.sim.final_list)
         final = {f["slug"] for f in self.store.get_final_list()}
+        passing = set(self.store.passing_candidates())
+        failing = set(self.store.failing_candidates())
+        for book in self.books():
+            self._seed_book(book, final, passing)
+        self._final_trials(final, passing, failing, now)
+
+    def _seed_book(self, book: Book, final, passing) -> None:
+        store = book.store
         keep = set(final)
         for slug, source, note in (
             [(s, "config", "Added from the settings file.") for s in self.sim.collections or []]
@@ -248,36 +353,41 @@ class PaperTrader:
         ):
             slug = (slug or "").strip()
             keep.add(slug)
-            if slug and self.store.get_position(slug) is None:
-                self.store.add_position(slug, note=note + " The first offer goes in at the next check.", source=source)
-        passing = set(self.store.passing_candidates())
-        failing = set(self.store.failing_candidates())
-        self._final_trials(final, passing, failing, now)
+            if slug and store.get_position(slug) is None:
+                store.add_position(slug, note=note + " The first offer goes in at the next check.", source=source)
+        if book.strategy == "B":
+            # B follows A's collections, including ones added by hand; a collection stopped in A is stopped in B
+            for a in self.store.get_positions():
+                if store.get_position(a["slug"]) is None:
+                    store.add_position(a["slug"], source=a.get("source") or "manual",
+                                       note="Strategy B: the first offer goes in at the next check.")
+                    if a["status"] == "stopped" and not a.get("auto_stopped"):
+                        store.set_status(a["slug"], "stop", note="Stopped, like strategy A.")
         if not self.sim.include_candidates:
             return
         for slug in sorted(passing):
-            pos = self.store.get_position(slug)
+            pos = store.get_position(slug)
             if pos is None:
-                self.store.add_position(slug, note="New candidate. The first offer goes in at the next check.",
-                                        source="candidate")
+                store.add_position(slug, note="New candidate. The first offer goes in at the next check.",
+                                   source="candidate")
             elif pos.get("auto_stopped") and pos["status"] in ("stopped", "removed"):
-                self.store.set_status(slug, "start", note="Back on the Candidates list: bidding again.")
+                store.set_status(slug, "start", note="Back on the Candidates list: bidding again.")
             elif pos.get("leaving"):
-                self.store.set_fields(slug, leaving=0, event=("start", "Back on the Candidates list: it bids again "
-                                                                        "after this sale."))
-        for pos in self.store.get_positions():
+                store.set_fields(slug, leaving=0, event=("start", "Back on the Candidates list: it bids again "
+                                                                  "after this sale."))
+        for pos in store.get_positions():
             slug = pos["slug"]
             if pos.get("source") != "candidate" or slug in passing or slug in keep:
                 continue
             if pos["status"] == "holding":
                 if not pos.get("leaving"):
-                    self.store.set_fields(slug, leaving=1, event=(
+                    store.set_fields(slug, leaving=1, event=(
                         "stop", "Off the Candidates list: no new offers. It leaves the simulation once the "
                                 "bought item sells."))
             elif pos["status"] == "stopped" and not pos.get("auto_stopped"):
-                self.store.set_status(slug, "remove", note="Off the Candidates list: removed from the simulation.")
+                store.set_status(slug, "remove", note="Off the Candidates list: removed from the simulation.")
             else:
-                self.store.auto_remove(slug, "Off the Candidates list: removed from the simulation.")
+                store.auto_remove(slug, "Off the Candidates list: removed from the simulation.")
 
     def _final_trials(self, final, passing, failing, now: int) -> None:
         discount = self.config.trade_model.target_sale_discount_from_floor_pct
@@ -316,44 +426,65 @@ class PaperTrader:
             else:
                 continue
             self.store.remove_final(slug)
-            closing = closing_trade(pos, discount, now) if pos.get("entry_price") is not None else None
-            self.store.set_status(slug, "remove", closing_trade=closing,
-                                  note=f"Trial failed ({why}): removed from the Final list and the simulation.")
+            for book in self.books():
+                bpos = pos if book.strategy == "A" else book.store.get_position(slug)
+                if bpos is None or bpos["status"] == "removed":
+                    continue
+                closing = closing_trade(bpos, discount, now) if bpos.get("entry_price") is not None else None
+                book.store.set_status(slug, "remove", closing_trade=closing,
+                                      note=f"Trial failed ({why}): removed from the Final list and the simulation.")
 
-    def tick(self, now: Optional[int] = None, keep_running: Callable[[], bool] = lambda: True) -> int:
-        """One check of every active position. OpenSeaNetworkError is passed up (the bot pauses)."""
+    def tick(self, now: Optional[int] = None, keep_running: Callable[[], bool] = lambda: True,
+             only_due: bool = False) -> int:
+        """
+        One check of every active position (only_due: just the collections whose check is due). Both strategies'
+        positions on a collection are checked together from one read of its market. Returns how many collections
+        were checked. OpenSeaNetworkError is passed up (the bot pauses).
+        """
+        now = int(now if now is not None else time.time())
         self.seed(now)
+        groups: Dict[str, List[Tuple[Book, Dict[str, Any]]]] = {}
+        for book in self.books():
+            for pos in book.store.get_positions():
+                if pos["status"] in ACTIVE_STATUSES:
+                    groups.setdefault(pos["slug"], []).append((book, pos))
         done = 0
-        for pos in self.store.get_positions():
-            if pos["status"] not in ACTIVE_STATUSES:
-                continue
+        for slug, items in groups.items():
             if not keep_running():
                 break
-            try:
-                self._step(pos, int(now if now is not None else time.time()))
-                done += 1
-            except OpenSeaNetworkError:
-                raise
-            except SimDataError as e:
-                self._note_problem(pos, str(e))
-            except Exception as e:  # one collection's problem must not stop the others or the bot
-                logger.exception("Simulation check failed for %s", pos["slug"])
-                self._note_problem(pos, f"Check failed: {e}")
+            if only_due and not any(self.is_due(pos, now) for _, pos in items):
+                continue
+            market = MarketView(self.provider, slug)
+            # The one with the oldest sales check first, so a single sales download covers both
+            items.sort(key=lambda bp: bp[1].get("last_sale_check") or 0)
+            checked = False
+            for book, pos in items:
+                try:
+                    self._step(book, pos, now, market)
+                    checked = True
+                except OpenSeaNetworkError:
+                    raise
+                except SimDataError as e:
+                    self._note_problem(book, pos, str(e))
+                except Exception as e:  # one collection's problem must not stop the others or the bot
+                    logger.exception("Simulation check failed for %s (strategy %s)", slug, book.strategy)
+                    self._note_problem(book, pos, f"Check failed: {e}")
+            done += checked
         self.seed(now)  # act on sales made this check (a leaving collection, a Final list trial) straight away
         return done
 
-    def _note_problem(self, pos: Dict[str, Any], message: str) -> None:
+    def _note_problem(self, book: Book, pos: Dict[str, Any], message: str) -> None:
         if pos.get("note") == message:
             return
         p = dict(pos)
         p["note"] = message
-        self.store.save_round(p, pos["rev"] or 0, events=[(int(time.time()), pos["slug"], "problem", message)])
+        book.store.save_round(p, pos["rev"] or 0, events=[(int(time.time()), pos["slug"], "problem", message)])
 
     # ------------------------------------------------------------------
-    def _load_costs(self, p: Dict[str, Any], currency: str) -> None:
+    def _load_costs(self, p: Dict[str, Any], currency: str, market: MarketView) -> None:
         """Name, chain, fees and gas, read at the start of each round."""
         slug = p["slug"]
-        coll = self.provider.get_collection(slug)
+        coll = market.collection()
         if coll is None:
             raise SimDataError("Couldn't load the collection from OpenSea. Trying again at the next check.")
         tm = self.config.trade_model
@@ -395,7 +526,7 @@ class PaperTrader:
         self.state_store.set_sale_order(h, kind, offer_type)
         return (kind, offer_type) if kind in ("offer", "listing") else (None, None)
 
-    def _step(self, pos: Dict[str, Any], now: int) -> None:
+    def _step(self, book: Book, pos: Dict[str, Any], now: int, market: MarketView) -> None:
         slug, rev = pos["slug"], pos["rev"] or 0
         p = dict(pos)
         events: List[tuple] = []
@@ -409,14 +540,14 @@ class PaperTrader:
 
         p["note"] = None  # only a problem is kept here; a check that gets this far has none
 
-        stats = self.provider.get_collection_stats(slug, max_age=60.0)  # a fresh floor, not the evaluator's
+        stats = market.stats()  # a fresh floor, not the evaluator's
         floor = stats.floor_price if stats and stats.floor_price and stats.floor_price > 0 else None
         # The coin is fixed from the first real floor (OpenSea's stats say "ETH" when there is no floor)
         currency = p.get("currency") or (stats.floor_price_symbol if floor else None)
         if currency is None:
             raise SimDataError("No floor price from OpenSea yet. Trying again at the next check.")
         if p.get("fee_pct") is None or p.get("round_started_at") is None:
-            self._load_costs(p, currency)
+            self._load_costs(p, currency, market)
         cur = p["currency"]
         groups = currency_groups(p["chain"])
         costs = Costs(p["fee_pct"], p["royalty_pct"], p["gas"], tm.target_sale_discount_from_floor_pct)
@@ -425,25 +556,21 @@ class PaperTrader:
         # 1. Real sales since the last check: would one of them have taken our offer, or bought our listing?
         if p.get("last_sale_check") is not None:
             after = int(p["last_sale_check"]) - SALE_LOOKBACK_SECONDS
-            fetch_all = getattr(self.provider, "get_sale_events_since", None)
-            if fetch_all is not None:
-                sales, complete = fetch_all(slug, after_timestamp=after, max_pages=10)
-            else:
-                sales, complete = self.provider.get_sale_events(slug, after_timestamp=after, max_pages=10), True
+            sales, complete = market.sales(after)
             if sales is not None:  # a failed download is retried whole at the next check
                 if not complete:
                     say("problem", "More than 1,000 sales since the last check. Only the newest were read, so a "
                                    "fill or sale may have been missed.")
-                sold_now = self._judge_sales(p, sales, floor, costs, groups, trades, seen, say)
+                sold_now = self._judge_sales(book, p, sales, floor, costs, groups, trades, seen, say)
                 p["last_sale_check"] = now
         else:
             p["last_sale_check"] = now
 
         # 2. Move our offer or listing for the market as it is now
         if p["status"] == "bidding" and not sold_now:  # after a sale the next round starts at the next check
-            top_offer = self.provider.get_top_offer(slug, currency_filter=lambda c: same_currency(c, cur, groups))
+            top_offer = market.top_offer(cur, groups)
             top = top_offer.price_value if top_offer else None
-            self._update_bid(p, top, floor, costs, now, say)
+            self._update_bid(book, p, top, floor, costs, now, say)
             ticks.append((slug, now, p["round"], "bidding", p["bid"], top, floor, None))
         elif p["status"] == "holding":
             prev = p.get("ask")
@@ -462,16 +589,18 @@ class PaperTrader:
             ticks.append((slug, now, p["round"], "holding", None, None, floor, ask))
         p["last_tick_at"] = now
 
-        if not self.store.save_round(p, rev, events, ticks, trades, seen):
-            logger.info("Simulation: %s was changed on the dashboard during the check; skipped this round.", slug)
+        if not book.store.save_round(p, rev, events, ticks, trades, seen):
+            logger.info("Simulation: %s (strategy %s) was changed during the check; skipped this round.",
+                        slug, book.strategy)
 
-    def _judge_sales(self, p, sales: List[SaleEvent], floor, costs: Costs, groups, trades, seen, say) -> bool:
+    def _judge_sales(self, book: Book, p, sales: List[SaleEvent], floor, costs: Costs, groups, trades, seen,
+                     say) -> bool:
         """Judges each real sale once, oldest first, against the offer or listing that stood at that moment."""
         slug, cur = p["slug"], p["currency"]
         fresh = sorted((e for e in sales if e.event_id), key=lambda e: e.event_timestamp)
-        already = self.store.seen_sales(slug, (e.event_id for e in fresh))
+        already = book.store.seen_sales(slug, (e.event_id for e in fresh))
         wash = _wash_keys(fresh)  # trading with yourself is not a market
-        round_ticks = self.store.get_ticks(slug, round_no=p["round"])
+        round_ticks = book.store.get_ticks(slug, round_no=p["round"])
         budget = [ORDER_LOOKUPS_PER_CHECK]
         max_pct = self.config.filters.trading_frequency.floor_sale_max_pct
         sold = False
@@ -497,6 +626,8 @@ class PaperTrader:
                 elif verdict == "ignored":
                     say("ignored", f"Ignored a sale at {fmt_price(price, cur)}: far below our offer, and OpenSea "
                                    f"doesn't show it as an accepted offer (likely a private sale or transfer).")
+                elif verdict == "no":
+                    pending = self._missed_fill(book, p, ev, price, t, floor, costs, budget, say)
             elif (p["status"] == "holding" and t["phase"] == "holding" and t["ask"]
                   and ev.event_timestamp >= (p.get("listed_at") or 0)):
                 ask = t["ask"]
@@ -510,13 +641,41 @@ class PaperTrader:
                     pending = kind == "pending"
                     # A seller accepting an offer for one particular item is not a buyer choosing a listing
                     if not pending and not (kind == "offer" and offer_type in ("trait", "item")):
-                        self._sell(p, ev, price, ask, costs, trades, say)
+                        self._sell(book, p, ev, price, ask, costs, trades, say)
                         round_ticks = []  # the next round has no prices yet
                         sold = True
             if not pending:
                 seen.append((slug, ev.event_id, ev.event_timestamp))
                 already.add(ev.event_id)
         return sold
+
+    def _missed_fill(self, book: Book, p, ev: SaleEvent, price: float, t, floor, costs: Costs, budget,
+                     say) -> bool:
+        """
+        A sale above our offer but under the floor is usually a seller accepting someone else's higher collection
+        offer: a fill we missed. Counted apart: within our limit (they outbid us between checks) or above it.
+        Returns True when OpenSea still has to be asked about the order (judge the sale at the next check).
+        """
+        ref_floor = t["floor"] or floor
+        if not ref_floor or price >= ref_floor:
+            return False  # at or above the floor: someone bought a listing
+        kind, offer_type = self._order(ev, budget)
+        if kind == "pending":
+            return True
+        if kind != "offer" or offer_type != "collection":
+            return False
+        cur, gap = p["currency"], self.gap_for(book, p)
+        limit = max_bid_for_gap(ref_floor, costs, gap)
+        if price <= limit:
+            p["missed_fills"] = (p.get("missed_fills") or 0) + 1
+            say("missed", f"Missed a fill: a seller accepted another offer of {fmt_price(price, cur)} while ours was "
+                          f"{fmt_price(t['bid'], cur)}. They had outbid us since our last check; our limit "
+                          f"({fmt_price(limit, cur)}) would have covered it.")
+        else:
+            p["missed_above_limit"] = (p.get("missed_above_limit") or 0) + 1
+            say("missed", f"Missed a fill: a seller accepted another offer of {fmt_price(price, cur)}, above our "
+                          f"{gap:g}% limit ({fmt_price(limit, cur)}).")
+        return False
 
     def _fill_verdict(self, ev: SaleEvent, price: float, bid: float, budget: List[int]) -> str:
         """fill, no, ignored (far below our offer and not an accepted offer) or pending (ask OpenSea next check)."""
@@ -529,7 +688,7 @@ class PaperTrader:
             return "pending"
         return "fill" if kind == "offer" else "ignored"
 
-    def _sell(self, p, ev, price, ask, costs: Costs, trades, say) -> None:
+    def _sell(self, book: Book, p, ev, price, ask, costs: Costs, trades, say) -> None:
         cur = p["currency"]
         r = trade_result(p["entry_price"], ask, costs)
         trades.append({
@@ -543,6 +702,14 @@ class PaperTrader:
         say("sold", f"Sold for {fmt_price(ask, cur)} after {held}: a buyer paid {fmt_price(price, cur)} for one. "
                     f"{'Profit' if r['net'] >= 0 else 'Loss'} {fmt_price(abs(r['net']), cur)} "
                     f"({r['roi_pct']:+.0f}%) after OpenSea fee, royalty and gas.")
+        if book.strategy == "B" and p.get("limit_pct") is not None:
+            # A sale: step the limit back up towards the full margin
+            b = self.sim.strategy_b
+            up = min(float(self.sim.min_profit_gap_pct), float(p["limit_pct"]) + b.step_pct)
+            if up != p["limit_pct"]:
+                say("stepup", f"Sold, so the next offer works to a {up:g}% limit (up from {p['limit_pct']:g}%).")
+            p["limit_pct"] = up
+        p["capped_since"] = None
         if p.get("leaving"):
             say("remove", "Off the Candidates list, so it leaves the simulation now the item has sold.")
             p.update({"status": "removed", "auto_stopped": 1, "leaving": 0, "entry_price": None, "entry_at": None,
@@ -556,11 +723,15 @@ class PaperTrader:
             p.update({"status": "stopped", "entry_price": None, "entry_at": None, "entry_tx": None,
                       "entry_token": None, "ask": None, "listed_at": None})
 
-    def _update_bid(self, p: Dict[str, Any], top: Optional[float], floor: Optional[float], costs: Costs,
-                    now: int, say) -> None:
+    def _update_bid(self, book: Book, p: Dict[str, Any], top: Optional[float], floor: Optional[float],
+                    costs: Costs, now: int, say) -> None:
         cur, prev, prev_state = p["currency"], p.get("bid"), p.get("bid_state")
-        gap = f"{self.sim.min_profit_gap_pct:g}%"
-        bid, state, limit = decide_bid(top, floor, costs, self.sim.min_profit_gap_pct, self.sim.outbid_step_pct, prev)
+        gap_value = self.gap_for(book, p)
+        bid, state, limit = decide_bid(top, floor, costs, gap_value, self.sim.outbid_step_pct, prev)
+        if book.strategy == "B":
+            bid, state, limit, gap_value = self._step_down(p, top, floor, costs, now, bid, state, limit, gap_value,
+                                                           say)
+        gap = f"{gap_value:g}%"
         if p.get("round_started_at") is None:
             p["round_started_at"] = now
         if state == "no_floor":
@@ -583,6 +754,7 @@ class PaperTrader:
             prev_top = p.get("competitor_top")
             if top is not None and top >= prev and (prev_top is None or prev_top < prev):
                 p["times_outbid"] = (p.get("times_outbid") or 0) + 1
+                p["last_outbid_at"] = now
             if state == "capped" and prev_state != "capped":
                 say("capped", f"Outbid: someone offered {fmt_price(top, cur)}, above our limit. Holding at "
                               f"{fmt_price(bid, cur)}, the most that keeps the floor {gap} above.")
@@ -600,3 +772,30 @@ class PaperTrader:
                   "floor": floor if floor else p.get("floor")})
         if bid is not None:
             p["highest_bid"] = max(bid, p.get("highest_bid") or 0.0)
+
+    def _step_down(self, p: Dict[str, Any], top, floor, costs: Costs, now: int, bid, state, limit, gap_value: float,
+                   say):
+        """
+        Strategy B: after every_hours held at its limit (capped) with no fill, lower the limit by step_pct, never
+        below lowest_gap_pct. A check where we hold the best offer again restarts the clock.
+        """
+        b = self.sim.strategy_b
+        if state != "capped":
+            if state != "no_floor":
+                p["capped_since"] = None
+            return bid, state, limit, gap_value
+        if p.get("capped_since") is None:
+            p["capped_since"] = now
+            return bid, state, limit, gap_value
+        lowest = min(float(b.lowest_gap_pct), float(self.sim.min_profit_gap_pct))
+        if now - p["capped_since"] < b.every_hours * 3600 or gap_value <= lowest:
+            return bid, state, limit, gap_value
+        new_gap = max(lowest, gap_value - b.step_pct)
+        p["limit_pct"], p["capped_since"] = new_gap, now
+        bid, state, limit = decide_bid(top, floor, costs, new_gap, self.sim.outbid_step_pct, p.get("bid"))
+        say("stepdown", f"Held at our limit for {b.every_hours:g} hours with no fill, so the limit drops from "
+                        f"{gap_value:g}% to {new_gap:g}%: we can now offer up to "
+                        f"{fmt_price(round_down(limit) if limit else None, p['currency'])}.")
+        if state != "capped":
+            p["capped_since"] = None
+        return bid, state, limit, new_gap

@@ -12,21 +12,31 @@ POSITION_COLUMNS = (
     "entry_price", "entry_at", "entry_tx", "entry_token", "ask", "listed_at",
     "round_started_at", "last_tick_at", "last_sale_check", "note", "created_at", "updated_at",
     "source", "auto_stopped", "leaving", "trial_round", "trial_state", "trial_started_at",
+    "last_outbid_at", "missed_fills", "missed_above_limit", "limit_pct", "capped_since",
 )
 # Added after the first release: (column, type) brought into older databases
 LATER_COLUMNS = (("leaving", "INTEGER DEFAULT 0"), ("trial_round", "INTEGER"), ("trial_state", "TEXT"),
-                 ("trial_started_at", "INTEGER"))
+                 ("trial_started_at", "INTEGER"), ("last_outbid_at", "INTEGER"),
+                 ("missed_fills", "INTEGER DEFAULT 0"), ("missed_above_limit", "INTEGER DEFAULT 0"),
+                 ("limit_pct", "REAL"), ("capped_since", "INTEGER"))
+# Strategy A (the rules shown on the dashboard) keeps the original sim_ tables; strategy B, a second set of
+# virtual offers judged on the same market data, has its own copy under simb_.
+STRATEGY_PREFIX = {"A": "sim_", "B": "simb_"}
 
 
 class SimStore:
     """
-    Paper-trading state, in the bot's own SQLite file (tables prefixed sim_).
-    The bot writes positions with a revision check, so a Stop or Remove pressed on the dashboard
-    while the bot is mid-check is never overwritten.
+    Paper-trading state for one strategy, in the bot's own SQLite file (tables prefixed sim_ for strategy A,
+    simb_ for B). The Final list is shared. The bot writes positions with a revision check, so a Stop or Remove
+    pressed on the dashboard while the bot is mid-check is never overwritten.
     """
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, strategy: str = "A"):
         self.db_path = db_path
+        self.strategy = strategy
+        pre = STRATEGY_PREFIX[strategy]
+        self.T_POS, self.T_TICKS, self.T_TRADES = pre + "positions", pre + "ticks", pre + "trades"
+        self.T_EVENTS, self.T_SEEN = pre + "events", pre + "seen_sales"
         self._init_db()
 
     def _conn(self) -> sqlite3.Connection:
@@ -39,8 +49,8 @@ class SimStore:
             c = conn.cursor()
             c.execute("PRAGMA journal_mode=WAL")
             # One virtual offer or listing per collection
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS sim_positions (
+            c.execute(f"""
+                CREATE TABLE IF NOT EXISTS {self.T_POS} (
                     slug TEXT PRIMARY KEY,
                     name TEXT, image TEXT, chain TEXT, currency TEXT,
                     status TEXT, round INTEGER DEFAULT 1, rev INTEGER DEFAULT 0,
@@ -54,21 +64,24 @@ class SimStore:
                     source TEXT, auto_stopped INTEGER DEFAULT 0
                 )
             """)
-            have = {r[1] for r in c.execute("PRAGMA table_info(sim_positions)")}
+            have = {r[1] for r in c.execute(f"PRAGMA table_info({self.T_POS})")}
             for col, kind in LATER_COLUMNS:
                 if col not in have:
-                    c.execute(f"ALTER TABLE sim_positions ADD COLUMN {col} {kind}")
+                    c.execute(f"ALTER TABLE {self.T_POS} ADD COLUMN {col} {kind}")
+            if "last_outbid_at" not in have and {"times_outbid", "last_tick_at"} <= have:
+                # Offers outbid before this was recorded count as contested from their last check
+                c.execute(f"UPDATE {self.T_POS} SET last_outbid_at=last_tick_at WHERE times_outbid > 0")
             # What the market and our offer or listing looked like at each check
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS sim_ticks (
+            c.execute(f"""
+                CREATE TABLE IF NOT EXISTS {self.T_TICKS} (
                     slug TEXT, ts INTEGER, round INTEGER, phase TEXT,
                     bid REAL, competitor_top REAL, floor REAL, ask REAL,
                     PRIMARY KEY (slug, ts)
                 )
             """)
             # Completed round trips: bought with the offer, sold with the listing
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS sim_trades (
+            c.execute(f"""
+                CREATE TABLE IF NOT EXISTS {self.T_TRADES} (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     slug TEXT, round INTEGER, currency TEXT,
                     entry_price REAL, entry_at INTEGER, entry_tx TEXT, entry_token TEXT,
@@ -78,15 +91,15 @@ class SimStore:
                 )
             """)
             # Plain-language log for the dashboard
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS sim_events (
+            c.execute(f"""
+                CREATE TABLE IF NOT EXISTS {self.T_EVENTS} (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     ts INTEGER, slug TEXT, kind TEXT, message TEXT
                 )
             """)
             # Real sales already looked at, so each one is judged once
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS sim_seen_sales (
+            c.execute(f"""
+                CREATE TABLE IF NOT EXISTS {self.T_SEEN} (
                     slug TEXT, event_id TEXT, ts INTEGER,
                     PRIMARY KEY (slug, event_id)
                 )
@@ -164,10 +177,10 @@ class SimStore:
         now = int(time.time())
         with self._conn() as conn:
             sets = ", ".join(f"{k}=?" for k in fields)
-            conn.execute(f"UPDATE sim_positions SET {sets}, updated_at=?, rev=COALESCE(rev, 0)+1 WHERE slug=?",
+            conn.execute(f"UPDATE {self.T_POS} SET {sets}, updated_at=?, rev=COALESCE(rev, 0)+1 WHERE slug=?",
                          (*fields.values(), now, slug))
             if event:
-                conn.execute("INSERT INTO sim_events (ts, slug, kind, message) VALUES (?, ?, ?, ?)", (now, slug, *event))
+                conn.execute(f"INSERT INTO {self.T_EVENTS} (ts, slug, kind, message) VALUES (?, ?, ?, ?)", (now, slug, *event))
             conn.commit()
 
     # ------------------------------------------------------------------
@@ -179,14 +192,14 @@ class SimStore:
 
     def get_positions(self, include_removed: bool = False) -> List[Dict[str, Any]]:
         with self._conn() as conn:
-            rows = conn.execute(f"SELECT {', '.join(POSITION_COLUMNS)} FROM sim_positions "
+            rows = conn.execute(f"SELECT {', '.join(POSITION_COLUMNS)} FROM {self.T_POS} "
                                 + ("" if include_removed else "WHERE status != 'removed' ")
                                 + "ORDER BY created_at, slug").fetchall()
         return [self._row(r) for r in rows]
 
     def get_position(self, slug: str) -> Optional[Dict[str, Any]]:
         with self._conn() as conn:
-            r = conn.execute(f"SELECT {', '.join(POSITION_COLUMNS)} FROM sim_positions WHERE slug=?", (slug,)).fetchone()
+            r = conn.execute(f"SELECT {', '.join(POSITION_COLUMNS)} FROM {self.T_POS} WHERE slug=?", (slug,)).fetchone()
         return self._row(r) if r else None
 
     def add_position(self, slug: str, note: str = "Added. The first offer goes in at the next check.",
@@ -200,10 +213,10 @@ class SimStore:
             return True
         now = int(time.time())
         with self._conn() as conn:
-            conn.execute("INSERT INTO sim_positions (slug, name, status, round, rev, times_outbid, note, "
+            conn.execute(f"INSERT INTO {self.T_POS} (slug, name, status, round, rev, times_outbid, note, "
                          "created_at, updated_at, source, auto_stopped) VALUES (?, ?, 'bidding', 1, 0, 0, ?, ?, ?, ?, 0)",
                          (slug, slug, note, now, now, source))
-            conn.execute("INSERT INTO sim_events (ts, slug, kind, message) VALUES (?, ?, 'added', ?)", (now, slug, note))
+            conn.execute(f"INSERT INTO {self.T_EVENTS} (ts, slug, kind, message) VALUES (?, ?, 'added', ?)", (now, slug, note))
             conn.commit()
         return True
 
@@ -240,12 +253,12 @@ class SimStore:
                 fields.update({"entry_price": None, "entry_at": None, "entry_tx": None, "entry_token": None,
                                "ask": None, "listed_at": None})
                 keys = list(closing_trade.keys())
-                conn.execute(f"INSERT INTO sim_trades ({', '.join(keys)}) VALUES ({', '.join('?' * len(keys))})",
+                conn.execute(f"INSERT INTO {self.T_TRADES} ({', '.join(keys)}) VALUES ({', '.join('?' * len(keys))})",
                              [closing_trade[k] for k in keys])
             sets = ", ".join(f"{k}=?" for k in fields)
             # rev+1 in SQL: a check the bot started before this click can't save over it
-            conn.execute(f"UPDATE sim_positions SET {sets}, rev=COALESCE(rev, 0)+1 WHERE slug=?", (*fields.values(), slug))
-            conn.execute("INSERT INTO sim_events (ts, slug, kind, message) VALUES (?, ?, ?, ?)",
+            conn.execute(f"UPDATE {self.T_POS} SET {sets}, rev=COALESCE(rev, 0)+1 WHERE slug=?", (*fields.values(), slug))
+            conn.execute(f"INSERT INTO {self.T_EVENTS} (ts, slug, kind, message) VALUES (?, ?, ?, ?)",
                          (now, slug, action, note))
             conn.commit()
         return self.get_position(slug)
@@ -263,22 +276,22 @@ class SimStore:
         pos["updated_at"] = now
         cols = [c for c in POSITION_COLUMNS if c != "slug"]
         with self._conn() as conn:
-            cur = conn.execute(f"UPDATE sim_positions SET {', '.join(f'{c}=?' for c in cols)} "
+            cur = conn.execute(f"UPDATE {self.T_POS} SET {', '.join(f'{c}=?' for c in cols)} "
                                f"WHERE slug=? AND rev=?", (*[pos.get(c) for c in cols], pos["slug"], expected_rev))
             if cur.rowcount != 1:
                 conn.rollback()
                 return False
-            conn.executemany("INSERT INTO sim_events (ts, slug, kind, message) VALUES (?, ?, ?, ?)", list(events))
-            conn.executemany("INSERT OR REPLACE INTO sim_ticks (slug, ts, round, phase, bid, competitor_top, floor, ask) "
+            conn.executemany(f"INSERT INTO {self.T_EVENTS} (ts, slug, kind, message) VALUES (?, ?, ?, ?)", list(events))
+            conn.executemany(f"INSERT OR REPLACE INTO {self.T_TICKS} (slug, ts, round, phase, bid, competitor_top, floor, ask) "
                              "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", list(ticks))
             for t in trades:
                 keys = list(t.keys())
-                conn.execute(f"INSERT INTO sim_trades ({', '.join(keys)}) VALUES ({', '.join('?' * len(keys))})",
+                conn.execute(f"INSERT INTO {self.T_TRADES} ({', '.join(keys)}) VALUES ({', '.join('?' * len(keys))})",
                              [t[k] for k in keys])
-            conn.executemany("INSERT OR IGNORE INTO sim_seen_sales (slug, event_id, ts) VALUES (?, ?, ?)", list(seen))
+            conn.executemany(f"INSERT OR IGNORE INTO {self.T_SEEN} (slug, event_id, ts) VALUES (?, ?, ?)", list(seen))
             # Housekeeping: keep 30 days of checks and 3 days of judged sales
-            conn.execute("DELETE FROM sim_ticks WHERE ts < ?", (now - 30 * 86400,))
-            conn.execute("DELETE FROM sim_seen_sales WHERE ts < ?", (now - 3 * 86400,))
+            conn.execute(f"DELETE FROM {self.T_TICKS} WHERE ts < ?", (now - 30 * 86400,))
+            conn.execute(f"DELETE FROM {self.T_SEEN} WHERE ts < ?", (now - 3 * 86400,))
             conn.commit()
         return True
 
@@ -286,7 +299,7 @@ class SimStore:
     # History
     # ------------------------------------------------------------------
     def get_ticks(self, slug: str, round_no: Optional[int] = None, since_ts: int = 0) -> List[Dict[str, Any]]:
-        q = "SELECT ts, round, phase, bid, competitor_top, floor, ask FROM sim_ticks WHERE slug=? AND ts>=?"
+        q = f"SELECT ts, round, phase, bid, competitor_top, floor, ask FROM {self.T_TICKS} WHERE slug=? AND ts>=?"
         args: List[Any] = [slug, since_ts]
         if round_no is not None:
             q += " AND round=?"
@@ -302,14 +315,14 @@ class SimStore:
             for i in range(0, len(ids), 500):
                 part = ids[i:i + 500]
                 out.update(r[0] for r in conn.execute(
-                    f"SELECT event_id FROM sim_seen_sales WHERE slug=? AND event_id IN ({','.join('?' * len(part))})",
+                    f"SELECT event_id FROM {self.T_SEEN} WHERE slug=? AND event_id IN ({','.join('?' * len(part))})",
                     [slug, *part]))
         return out
 
     def get_round_sales(self, slug: str, from_round: int) -> List[Dict[str, Any]]:
         """Completed sales (not removals) of a collection from a round on, oldest first."""
         with self._conn() as conn:
-            rows = conn.execute("SELECT round, net, currency FROM sim_trades WHERE slug=? AND round>=? AND how='sold' "
+            rows = conn.execute(f"SELECT round, net, currency FROM {self.T_TRADES} WHERE slug=? AND round>=? AND how='sold' "
                                 "ORDER BY id", (slug, from_round)).fetchall()
         return [dict(zip(("round", "net", "currency"), r)) for r in rows]
 
@@ -317,24 +330,24 @@ class SimStore:
         cols = ("id", "slug", "round", "currency", "entry_price", "entry_at", "entry_tx", "entry_token",
                 "exit_price", "exit_at", "exit_tx", "fees", "gas", "net", "roi_pct", "times_outbid", "how")
         with self._conn() as conn:
-            rows = conn.execute(f"SELECT {', '.join(cols)} FROM sim_trades ORDER BY exit_at DESC LIMIT ?", (limit,)).fetchall()
+            rows = conn.execute(f"SELECT {', '.join(cols)} FROM {self.T_TRADES} ORDER BY exit_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(zip(cols, r)) for r in rows]
 
     def get_events(self, limit: int = 100) -> List[Dict[str, Any]]:
         with self._conn() as conn:
-            rows = conn.execute("SELECT ts, slug, kind, message FROM sim_events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            rows = conn.execute(f"SELECT ts, slug, kind, message FROM {self.T_EVENTS} ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [{"ts": r[0], "slug": r[1], "kind": r[2], "message": r[3]} for r in rows]
 
     def get_last_events(self) -> Dict[str, Dict[str, Any]]:
         """Each collection's latest event (problems aside), however busy the others are."""
         with self._conn() as conn:
-            rows = conn.execute("SELECT ts, slug, kind, message FROM sim_events WHERE id IN "
-                                "(SELECT MAX(id) FROM sim_events WHERE kind != 'problem' GROUP BY slug)").fetchall()
+            rows = conn.execute(f"SELECT ts, slug, kind, message FROM {self.T_EVENTS} WHERE id IN "
+                                f"(SELECT MAX(id) FROM {self.T_EVENTS} WHERE kind != 'problem' GROUP BY slug)").fetchall()
         return {r[1]: {"ts": r[0], "slug": r[1], "kind": r[2], "message": r[3]} for r in rows}
 
     def log(self, slug: str, kind: str, message: str):
         with self._conn() as conn:
-            conn.execute("INSERT INTO sim_events (ts, slug, kind, message) VALUES (?, ?, ?, ?)",
+            conn.execute(f"INSERT INTO {self.T_EVENTS} (ts, slug, kind, message) VALUES (?, ?, ?, ?)",
                          (int(time.time()), slug, kind, message))
             conn.commit()
 

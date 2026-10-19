@@ -9,7 +9,8 @@
   var EVENT_COLORS = { placed: "c-accent", raised: "c-accent", lowered: "c-muted", top: "c-good", capped: "c-warn",
                        limit: "c-muted", paused: "c-warn", filled: "c-good", listed: "c-accent", repriced: "c-muted",
                        sold: "c-good", ignored: "c-muted", problem: "c-bad", added: "c-muted", stop: "c-muted",
-                       start: "c-muted", remove: "c-muted", trial: "c-warn", kept: "c-good" };
+                       start: "c-muted", remove: "c-muted", trial: "c-warn", kept: "c-good", missed: "c-warn",
+                       stepdown: "c-warn", stepup: "c-good" };
   var data = null, busy = false;
 
   // Offers sit 0.1% apart, so prices here show at least 4 significant digits (with the dollar value on hover)
@@ -31,6 +32,43 @@
   }
   function osLink(slug, text) {
     return '<a href="https://opensea.io/collection/' + encodeURIComponent(slug) + '" target="_blank" rel="noopener">' + esc(text) + "</a>";
+  }
+
+  function bOn() { return !!(data && data.strategy_b && data.strategy_b.enabled); }
+  function bTag() { return '<span class="tag-b" title="Strategy B: the same collections, with a limit that steps down while our offer gets no fills">B</span>'; }
+  function limitOf(b, fallback) { return isNum(b && b.limit_pct) ? b.limit_pct : fallback; }
+
+  // How often the bot looks at this collection: sooner where someone outbid us lately, less often where it's quiet
+  function cadence(p) {
+    var s = p.check_every;
+    if (!isNum(s) || p.status === "stopped") return "";
+    var why = s < data.interval_seconds ? ", outbid lately" : s > data.interval_seconds ? ", quiet" : "";
+    return "every " + hours(s) + why;
+  }
+
+  function missedText(p) {
+    var n = (p.missed_fills || 0) + (p.missed_above_limit || 0);
+    if (!n) return "";
+    return "missed " + n + (n === 1 ? " fill" : " fills") + (p.missed_fills ? " (" + p.missed_fills + " within our limit)" : "");
+  }
+
+  // Strategy B's own offer or item on this collection, one line under strategy A's numbers
+  function bLine(p) {
+    var b = p.b, cur = p.currency || "";
+    if (!bOn() || !b || b.status === "removed") return "";
+    var txt;
+    if (b.entry_price != null) {
+      txt = "bought for " + price(b.entry_price, cur) + (isNum(b.ask) ? ", listed at " + price(b.ask, cur) : "") +
+        " · " + profitHtml(b.now_net, b.now_roi_pct, cur) + " at today's floor";
+    } else if (b.status === "stopped") txt = "stopped";
+    else if (b.bid_state === "paused") txt = "no offer: the spread is too thin even at this limit";
+    else if (isNum(b.bid)) {
+      txt = "offer " + price(b.bid, cur) + (b.bid_state === "capped" ? ", at its limit" :
+        b.bid_state === "top" || b.bid_state === "alone" ? ", the best offer" : "");
+    } else txt = "places its offer at the next check";
+    var extra = missedText(b);
+    return '<p class="sim-b">' + bTag() + fmt(limitOf(b, data.min_profit_gap_pct), 0) + "% limit · " + txt +
+      (extra ? " · " + esc(extra) : "") + "</p>";
   }
 
   // A Final list pick that stopped passing gets one simulated round (7 days at most) to show a profit
@@ -106,6 +144,7 @@
     if (trial) meta.push(trial);
     if ((p.round || 1) > 1) meta.push("round " + p.round);
     if (p.times_outbid) meta.push("outbid " + p.times_outbid + (p.times_outbid === 1 ? " time" : " times"));
+    meta.push(missedText(p));
     var btns = (p.status === "stopped"
       ? '<button class="btn" type="button" data-act="start" data-slug="' + esc(p.slug) + '">Start</button>'
       : '<button class="btn ghost" type="button" data-act="stop" data-slug="' + esc(p.slug) + '">Stop</button>') +
@@ -113,11 +152,12 @@
     return '<div class="card sim-card">' +
       '<div class="sim-head">' + N.art(p.slug, p.image) + '<div style="min-width:0;flex:1"><div class="cand-name"><span>' + osLink(p.slug, p.name || p.slug) + "</span></div>" +
       '<div class="cand-meta">' + esc(meta.filter(Boolean).join(" · ")) + "</div></div>" + statusPill(p) + "</div>" +
-      '<dl class="kv" style="margin:0">' + kv + "</dl>" +
+      '<dl class="kv" style="margin:0">' + kv + "</dl>" + bLine(p) +
       chart((data.charts || {})[p.slug], cur) +
       (p.note ? '<p class="sim-note c-bad">' + esc(p.note) + "</p>" : "") +
       (lastEvent ? '<p class="sim-last"><span class="muted">' + esc(N.ago(lastEvent.ts)) + ":</span> " + esc(lastEvent.message) + "</p>" : "") +
-      '<div class="cand-foot"><span>' + (p.last_tick_at ? "Checked " + esc(N.ago(p.last_tick_at)) : "Not checked yet") + "</span>" +
+      '<div class="cand-foot"><span>' + (p.last_tick_at ? "Checked " + esc(N.ago(p.last_tick_at)) : "Not checked yet") +
+      (cadence(p) ? " · " + esc(cadence(p)) : "") + "</span>" +
       '<span class="sim-btns">' + btns + "</span></div></div>";
   }
 
@@ -129,6 +169,49 @@
       if (u == null) missing[t.currency || "?"] = (missing[t.currency || "?"] || 0) + v; else { usd += u; any = true; }
     });
     return { usd: any ? usd : null, missing: missing };
+  }
+
+  function totalText(items) {
+    var t = sumUsd(items, "net"), miss = Object.keys(t.missing), txt = t.usd != null ? N.usd(t.usd) : "";
+    miss.forEach(function (c) { txt += (txt ? " + " : "") + N.moneyText(t.missing[c], c); });
+    return { text: txt || "–", usd: t.usd, any: t.usd != null || miss.length > 0 };
+  }
+
+  // One strategy's results: offers held on top, fills, sales, profit (held items valued at today's floor)
+  function results(rows, trades) {
+    var bidding = rows.filter(function (p) { return p.status === "bidding"; });
+    var holding = rows.filter(function (p) { return p.status === "holding" || (p.status === "stopped" && p.entry_price != null); });
+    var held = holding.map(function (p) { return { net: p.now_net, currency: p.currency }; });
+    return {
+      bidding: bidding.length, holding: holding.length,
+      onTop: bidding.filter(function (p) { return p.bid_state === "top" || p.bid_state === "alone"; }).length,
+      filled: trades.length + holding.length,
+      sold: trades.filter(function (t) { return t.how !== "removed"; }).length,
+      missed: rows.reduce(function (n, p) { return n + (p.missed_fills || 0) + (p.missed_above_limit || 0); }, 0),
+      total: totalText(trades.concat(held))
+    };
+  }
+
+  // Strategy A against strategy B, side by side
+  function renderCompare(d) {
+    var box = $("simCompare");
+    if (!bOn()) { box.hidden = true; return; }
+    var pos = d.positions || [], b = d.strategy_b;
+    var a = results(pos, d.trades || []);
+    var bb = results(pos.map(function (p) { return p.b; }).filter(function (x) { return x && x.status !== "removed"; }), d.trades_b || []);
+    function row(name, rule, r) {
+      return "<tr><td><strong>" + name + '</strong><div class="sub">' + esc(rule) + '</div></td><td data-l="Best offer held">' + r.onTop + " of " + r.bidding +
+        '</td><td data-l="Filled">' + r.filled + '</td><td data-l="Sold">' + r.sold + '</td><td data-l="Missed fills">' + r.missed +
+        '</td><td data-l="Profit so far" class="' + (isNum(r.total.usd) && r.total.usd < 0 ? "c-bad" : r.total.any ? "c-good" : "") + '">' + esc(r.total.text) + "</td></tr>";
+    }
+    box.hidden = false;
+    box.innerHTML = '<div class="section-title"><h2>Two strategies</h2><span>Same collections, same market data</span></div>' +
+      '<div class="tbl-scroll"><table class="tbl sim-trades"><thead><tr><th>Strategy</th><th>Best offer held</th><th>Filled</th><th>Sold</th>' +
+      '<th title="Sales where a seller took someone else\'s higher collection offer, under the floor">Missed fills</th><th>Profit so far</th></tr></thead><tbody>' +
+      row("Strategy A", "fixed " + fmt(d.min_profit_gap_pct, 0) + "% limit", a) +
+      row("Strategy B", "limit steps down " + fmt(b.step_pct, 0) + "% a day with no fill, to " + fmt(Math.min(b.lowest_gap_pct, d.min_profit_gap_pct), 0) + "%", bb) +
+      "</tbody></table></div>" +
+      '<p class="chart-note" style="margin:8px 0 0">Profit counts items still held as if sold ' + fmt(d.exit_discount_pct, 0) + "% under today's floor. The Stats above are strategy A.</p>";
   }
 
   function render() {
@@ -150,11 +233,6 @@
     // Results count bought items that haven't sold as if sold under today's floor: listings never go below
     // break-even, so a losing round shows up as an item that doesn't sell, not as a losing sale.
     var held = holding.map(function (p) { return { net: p.now_net, currency: p.currency }; });
-    function totalText(items) {
-      var t = sumUsd(items, "net"), miss = Object.keys(t.missing), txt = t.usd != null ? N.usd(t.usd) : "";
-      miss.forEach(function (c) { txt += (txt ? " + " : "") + N.moneyText(t.missing[c], c); });
-      return { text: txt || "–", usd: t.usd, any: t.usd != null || miss.length > 0 };
-    }
     var all = totalText(trades.concat(held)), realised = totalText(trades), open = totalText(held);
     var profitSub = !holding.length ? "after OpenSea fee, royalty and gas" :
       (trades.length ? realised.text + " closed, " : "") + open.text + " on " + holding.length +
@@ -164,7 +242,9 @@
       '<div class="card stat"><span class="stat-label">Offers filled</span><span class="stat-value num">' + (trades.length + holding.length) + '</span><span class="stat-sub">' + holding.length + " waiting to sell</span></div>" +
       '<div class="card stat"><span class="stat-label">Sold</span><span class="stat-value num">' + sold.length + '</span><span class="stat-sub">' +
         (under ? under + (under === 1 ? " item" : " items") + " held below break-even" : sold.length ? "never below break-even" : "no round trip yet") + "</span></div>" +
-      '<div class="card stat"><span class="stat-label">Profit so far</span><span class="stat-value num ' + (isNum(all.usd) && all.usd < 0 ? "c-bad" : all.any ? "c-good" : "") + '">' + esc(all.text) + '</span><span class="stat-sub">' + esc(profitSub) + "</span></div>";
+      '<div class="card stat"><span class="stat-label">Profit so far' + (bOn() ? " (A)" : "") + '</span><span class="stat-value num ' + (isNum(all.usd) && all.usd < 0 ? "c-bad" : all.any ? "c-good" : "") + '">' + esc(all.text) + '</span><span class="stat-sub">' + esc(profitSub) + "</span></div>";
+
+    renderCompare(d);
 
     // Rules in plain words, from the current settings
     if ($("simRules").contains(document.activeElement)) return renderRest();
@@ -179,7 +259,15 @@
       "<li><strong>Fill.</strong> When a real seller sells one for our offer or less, they would have taken ours instead, so we count it as bought at our offer.</li>" +
       "<li><strong>Sell.</strong> We list it " + fmt(d.exit_discount_pct, 0) + "% under the floor and count it sold when a real buyer pays that or more for a floor item." +
       (d.repeat ? " Then we bid again." : "") + "</li>" +
-      "<li><strong>If the floor falls.</strong> We never list below break-even, so the item waits until the floor recovers. Profit so far counts it as if sold under today's floor, so a loss still shows.</li></ol>";
+      "<li><strong>If the floor falls.</strong> We never list below break-even, so the item waits until the floor recovers. Profit so far counts it as if sold under today's floor, so a loss still shows.</li>" +
+      "<li><strong>Missed fills.</strong> A sale under the floor and above our offer is usually a seller taking someone else's higher collection offer. We count those, and whether our limit would have covered that price.</li>" +
+      "<li><strong>How often.</strong> A collection where someone outbid us in the last day is checked every " + esc(hours(d.contested_interval_seconds)) +
+      ", one where we've held the best offer unchallenged for a day every " + esc(hours(d.quiet_interval_seconds)) + ", the rest every " + esc(hours(d.interval_seconds)) + ".</li>" +
+      (bOn() ? "<li><strong>Strategy B.</strong> A second set of offers on the same collections, judged on the same sales. When its offer has sat at the limit for " +
+        fmt(d.strategy_b.every_hours, 0) + " hours with no fill, the limit drops " + fmt(d.strategy_b.step_pct, 0) + "% (" + fmt(d.min_profit_gap_pct, 0) + "% to " +
+        fmt(d.min_profit_gap_pct - d.strategy_b.step_pct, 0) + "% and so on, never below " + fmt(Math.min(d.strategy_b.lowest_gap_pct, d.min_profit_gap_pct), 0) +
+        "%), so it can outbid others. After a sale it steps back up " + fmt(d.strategy_b.step_pct, 0) + "%. Buttons on a card apply to both.</li>" : "") +
+      "</ol>";
     renderRest();
   }
 
@@ -190,11 +278,14 @@
     $("simGrid").innerHTML = pos.length ? pos.map(function (p) { return card(p, p.last_event); }).join("") :
       '<div class="card empty"><h3>No collections yet</h3>Add one below, or list them under <code>simulation: collections</code> in config/config.yaml.</div>';
 
-    // Trades
-    $("simTradesSub").textContent = trades.length ? trades.length + (trades.length === 1 ? " round trip" : " round trips") : "Bought and sold";
+    // Trades, both strategies, newest first
+    var tradesB = bOn() ? d.trades_b || [] : [];
+    var nA = trades.length;
+    trades = trades.concat(tradesB).sort(function (x, y) { return (y.exit_at || 0) - (x.exit_at || 0); });
+    $("simTradesSub").textContent = trades.length ? nA + (nA === 1 ? " round trip" : " round trips") + (bOn() ? " (A), " + tradesB.length + " (B)" : "") : "Bought and sold";
     $("simTrades").innerHTML = trades.length ? '<div class="tbl-scroll"><table class="tbl sim-trades"><thead><tr><th>Collection</th><th>Bought</th><th>Sold</th><th>Held</th><th>Profit</th></tr></thead><tbody>' +
       trades.map(function (t) {
-        return "<tr><td>" + osLink(t.slug, t.name) + '<div class="sub">' + esc(N.fmtDay(t.exit_at)) +
+        return "<tr><td>" + (t.strategy === "B" ? bTag() : "") + osLink(t.slug, t.name) + '<div class="sub">' + esc(N.fmtDay(t.exit_at)) +
           (t.how === "removed" ? " · removed, valued at the floor" : "") + "</div></td><td>" + price(t.entry_price, t.currency) +
           "</td><td>" + price(t.exit_price, t.currency) + "</td><td>" + esc(hours(t.hold_seconds)) + "</td><td>" + profitHtml(t.net, t.roi_pct, t.currency) + "</td></tr>";
       }).join("") + "</tbody></table></div>" :
@@ -204,7 +295,7 @@
     var now = new Date();
     $("simFeed").innerHTML = events.length ? events.slice(0, 30).map(function (e) {
       var t = N.fmtDay(e.ts) === N.fmtDay(now) ? N.fmtTime(e.ts) : N.fmtDay(e.ts).split(",")[0];
-      return "<li><time>" + esc(t) + '</time><span class="dot ' + (EVENT_COLORS[e.kind] || "c-muted") + '"></span><span><strong>' + esc(e.name) + "</strong>: " + esc(e.message) + "</span></li>";
+      return "<li><time>" + esc(t) + '</time><span class="dot ' + (EVENT_COLORS[e.kind] || "c-muted") + '"></span><span>' + (e.strategy === "B" ? bTag() : "") + "<strong>" + esc(e.name) + "</strong>: " + esc(e.message) + "</span></li>";
     }).join("") : '<li style="grid-template-columns:1fr" class="muted">Nothing yet.</li>';
   }
 
@@ -245,17 +336,23 @@
   });
 
   // ---------- Final list ----------
-  var finBusy = false;
+  var finBusy = false, finData = null;
+  function finProfit(label, r, cur) {
+    var held = r.entry_price != null;
+    var total = (isNum(r.realised_net) ? r.realised_net : 0) + (held && isNum(r.now_net) ? r.now_net : 0);
+    var has = isNum(r.realised_net) || (held && isNum(r.now_net));
+    var sub = [];
+    if (r.trades) sub.push(r.trades + (r.trades === 1 ? " sale" : " sales") + (isNum(r.realised_net) ? " " + (r.realised_net >= 0 ? "+" : "−") + N.moneyText(Math.abs(r.realised_net), cur) : ""));
+    if (held) sub.push("1 held, " + (isNum(r.now_net) ? (r.now_net >= 0 ? "+" : "−") + N.moneyText(Math.abs(r.now_net), cur) : "–") + " at today's floor");
+    if (!has && isNum(r.est_net)) sub.push("if it fills: " + (r.est_net >= 0 ? "+" : "−") + N.moneyText(Math.abs(r.est_net), cur) + " (" + fmt(r.est_roi_pct, 0) + "%)");
+    return '<div class="fin-profit"><span class="muted">' + label + "</span><strong>" + (has ? profitHtml(total, null, cur) : "–") + "</strong>" +
+      '<span class="fin-sub">' + esc(sub.join(" · ") || "no fills yet") + "</span></div>";
+  }
   function finRow(f) {
-    var cur = f.currency || "", held = f.entry_price != null;
-    var total = (isNum(f.realised_net) ? f.realised_net : 0) + (held && isNum(f.now_net) ? f.now_net : 0);
-    var hasTotal = isNum(f.realised_net) || (held && isNum(f.now_net));
-    var profitSub = [];
-    if (f.trades) profitSub.push(f.trades + (f.trades === 1 ? " sale" : " sales") + (isNum(f.realised_net) ? " " + (f.realised_net >= 0 ? "+" : "−") + N.moneyText(Math.abs(f.realised_net), cur) : ""));
-    if (held) profitSub.push("1 held, " + (isNum(f.now_net) ? (f.now_net >= 0 ? "+" : "−") + N.moneyText(Math.abs(f.now_net), cur) : "–") + " at today's floor");
-    if (!hasTotal && isNum(f.est_net)) profitSub.push("if it fills: " + (f.est_net >= 0 ? "+" : "−") + N.moneyText(Math.abs(f.est_net), cur) + " (" + fmt(f.est_roi_pct, 0) + "%)");
+    var cur = f.currency || "", held = f.entry_price != null, withB = finData && finData.strategy_b && f.b && f.b.status;
     var stateLine = !f.status ? "Not in the simulation yet" : held ? "Bought for " + N.moneyText(f.entry_price, cur) + (isNum(f.ask) ? ", listed at " + N.moneyText(f.ask, cur) : "") :
       isNum(f.bid) ? "Our offer " + N.moneyText(f.bid, cur) + (isNum(f.competitor_top) ? " · best other " + N.moneyText(f.competitor_top, cur) : "") + (isNum(f.floor) ? " · floor " + N.moneyText(f.floor, cur) : "") : "Waiting for the first check";
+    if (missedText(f)) stateLine += " · " + missedText(f);
     return '<div class="fin-row">' + N.art(f.slug, f.image) +
       '<div class="fin-main"><div class="cand-name"><span>' + osLink(f.slug, f.name || f.slug) + "</span></div>" +
       '<div class="cand-meta">' + esc([N.chainName(f.chain), f.added_by === "claude" ? "added by Claude" : "added by you"].filter(Boolean).join(" · ")) + "</div>" +
@@ -264,14 +361,15 @@
       '<p class="fin-state">' + esc(stateLine) + "</p>" +
       (f.last_event ? '<p class="sim-last"><span class="muted">' + esc(N.ago(f.last_event.ts)) + ":</span> " + esc(f.last_event.message) + "</p>" : "") + "</div>" +
       '<div class="fin-side">' + (f.status ? statusPill(f) : '<span class="pill neutral">Not simulated</span>') +
-      '<div class="fin-profit"><span class="muted">Simulation profit</span><strong>' + (hasTotal ? profitHtml(total, null, cur) : "–") + "</strong>" +
-      '<span class="fin-sub">' + esc(profitSub.join(" · ") || "no fills yet") + "</span></div>" +
+      finProfit(withB ? "Strategy A profit" : "Simulation profit", f, cur) +
+      (withB ? finProfit(bTag() + "Strategy B profit (" + fmt(limitOf(f.b, finData.min_profit_gap_pct), 0) + "% limit)", f.b, cur) : "") +
       '<button class="btn ghost" type="button" data-fin-remove="' + esc(f.slug) + '" data-name="' + esc(f.name || f.slug) + '">Remove</button></div></div>';
   }
   function loadFinal() {
     if (finBusy) return;
     finBusy = true;
     N.api("/api/final").then(function (r) {
+      finData = r;
       $("finList").innerHTML = r.items.length ? r.items.map(finRow).join("") :
         '<div class="empty"><h3>Nothing on the Final list</h3>Add a collection below, or ask Claude to check one.</div>';
     }, function (e) { $("finList").innerHTML = '<div class="empty">' + esc(e.message || "Couldn't load the Final list.") + "</div>"; })

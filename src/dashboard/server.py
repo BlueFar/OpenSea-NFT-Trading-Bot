@@ -16,7 +16,7 @@ from ..providers.opensea.provider import OpenSeaProvider
 from ..collectors.orchestrator import CollectionEvaluator
 from ..collectors.chain_volume import summarize as summarize_chain_volume
 from ..runtime import control, launchd
-from ..simulation.engine import closing_trade, describe_position
+from ..simulation.engine import check_interval, closing_trade, describe_position
 from ..simulation.store import SimStore
 from ..runtime.control import BotProcessManager, PID_FILE, LOG_FILE, WORKSPACE_ROOT  # noqa: F401 (re-exported)
 from ..utils.logging import setup_logger
@@ -718,6 +718,13 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             store = type(self).sim_store = SimStore(self.state_store.db_path)
         return store
 
+    def _sim_store_b(self) -> SimStore:
+        """Strategy B's positions (the stepped-down limit), kept beside strategy A's."""
+        store = getattr(type(self), "sim_store_b", None)
+        if store is None or store.db_path != self.state_store.db_path:
+            store = type(self).sim_store_b = SimStore(self.state_store.db_path, strategy="B")
+        return store
+
     def _sim_config(self) -> BotConfig:
         try:
             return load_config(self.config_path)
@@ -727,11 +734,23 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
     def _handle_get_simulation(self):
         import time
         cfg = self._sim_config()
-        store = self._sim_store()
+        store, store_b = self._sim_store(), self._sim_store_b()
         discount = cfg.trade_model.target_sale_discount_from_floor_pct
+        now = int(time.time())
         last = store.get_last_events()
-        positions = [dict(describe_position(p, discount), last_event=last.get(p["slug"])) for p in store.get_positions()]
-        since = int(time.time()) - 3 * 86400
+        b_on = cfg.simulation.strategy_b.enabled
+        b_pos = {p["slug"]: p for p in store_b.get_positions()} if b_on else {}
+        positions = []
+        for p in store.get_positions():
+            d = dict(describe_position(p, discount), last_event=last.get(p["slug"]),
+                     check_every=check_interval(p, cfg.simulation, now))
+            if p["slug"] in b_pos:
+                d["b"] = describe_position(b_pos[p["slug"]], discount)
+                if b_pos[p["slug"]]["status"] in ("bidding", "holding"):
+                    # The bot checks a collection when either strategy is due
+                    d["check_every"] = min(d["check_every"], check_interval(b_pos[p["slug"]], cfg.simulation, now))
+            positions.append(d)
+        since = now - 3 * 86400
         charts = {}
         for p in positions:
             ticks = store.get_ticks(p["slug"], since_ts=since)
@@ -739,10 +758,21 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             charts[p["slug"]] = [[t["ts"], t["bid"], t["competitor_top"], t["floor"], t["ask"]] for t in ticks[::step]]
         names = {p["slug"]: p.get("name") or p["slug"] for p in store.get_positions(include_removed=True)}
         trades = store.get_trades()
-        for t in trades:
+        trades_b = store_b.get_trades() if b_on else []
+        for t in trades + trades_b:
             t["name"] = names.get(t["slug"], t["slug"])
             t["hold_seconds"] = (t["exit_at"] or 0) - (t["entry_at"] or 0)
-        events = store.get_events(80)
+        for t in trades_b:
+            t["strategy"] = "B"
+        # Strategy B's own events (its offers, step-downs, fills) join the feed, marked B
+        events = [dict(e, strategy="A") for e in store.get_events(80)]
+        if b_on:
+            # Only where B did something different: the same move at the same check is shown once
+            same = {(e["ts"], e["slug"], e["message"]) for e in events}
+            events += [dict(e, strategy="B") for e in store_b.get_events(80)
+                       if e["kind"] not in ("added", "problem") and (e["ts"], e["slug"], e["message"]) not in same]
+            events.sort(key=lambda e: e["ts"], reverse=True)
+            events = events[:100]
         for e in events:
             e["name"] = names.get(e["slug"], e["slug"])
         summary = self.state_store.get_status_summary()
@@ -752,6 +782,9 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             "include_candidates": sim.include_candidates,
             "final": [f["slug"] for f in store.get_final_list()],
             "interval_seconds": sim.interval_seconds,
+            "contested_interval_seconds": min(sim.interval_seconds, sim.contested_interval_seconds),
+            "quiet_interval_seconds": max(sim.interval_seconds, sim.quiet_interval_seconds),
+            "strategy_b": sim.strategy_b.model_dump(),
             "min_profit_gap_pct": sim.min_profit_gap_pct,
             "outbid_step_pct": sim.outbid_step_pct,
             "repeat": sim.repeat,
@@ -760,6 +793,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             "positions": positions,
             "charts": charts,
             "trades": trades,
+            "trades_b": trades_b,
             "events": events,
         })
 
@@ -800,6 +834,12 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         trades_by: Dict[str, List[Dict[str, Any]]] = {}
         for t in store.get_trades(limit=5000):
             trades_by.setdefault(t["slug"], []).append(t)
+        b_on = cfg.simulation.strategy_b.enabled
+        store_b = self._sim_store_b()
+        positions_b = {p["slug"]: p for p in store_b.get_positions(include_removed=True)} if b_on else {}
+        trades_b: Dict[str, List[Dict[str, Any]]] = {}
+        for t in (store_b.get_trades(limit=5000) if b_on else []):
+            trades_b.setdefault(t["slug"], []).append(t)
         items = []
         for f in store.get_final_list():
             pos = positions.get(f["slug"])
@@ -818,8 +858,21 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 "wins": sum(1 for t in trades if (t["net"] or 0) >= 0),
                 "last_event": last.get(f["slug"]), "last_tick_at": d.get("last_tick_at"),
                 "trial_state": d.get("trial_state"), "trial_started_at": d.get("trial_started_at"),
+                "missed_fills": d.get("missed_fills") or 0, "missed_above_limit": d.get("missed_above_limit") or 0,
+                "b": self._final_b(positions_b.get(f["slug"]), trades_b.get(f["slug"], []), discount) if b_on else None,
             })
-        self._send_json({"items": items, "interval_seconds": cfg.simulation.interval_seconds})
+        self._send_json({"items": items, "interval_seconds": cfg.simulation.interval_seconds,
+                         "min_profit_gap_pct": cfg.simulation.min_profit_gap_pct, "strategy_b": b_on})
+
+    @staticmethod
+    def _final_b(pos: Optional[Dict[str, Any]], trades: List[Dict[str, Any]], discount: float) -> Dict[str, Any]:
+        """Strategy B's result for one Final list collection."""
+        d = describe_position(pos, discount) if pos else {}
+        held = d.get("entry_price") is not None and d.get("status") != "removed"
+        return {"status": d.get("status"), "bid": d.get("bid"), "bid_state": d.get("bid_state"), "ask": d.get("ask"),
+                "limit_pct": d.get("limit_pct"), "entry_price": d.get("entry_price") if held else None,
+                "now_net": d.get("now_net") if held else None, "trades": len(trades),
+                "realised_net": sum(t["net"] or 0 for t in trades) if trades else None}
 
     def _handle_final_action(self, action: str):
         if action not in ("add", "remove"):
@@ -843,12 +896,14 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         if store.get_position(slug) is None and not self._collection_exists(slug):
             return
         store.add_final(slug, added_by="you", note=str(body.get("note") or "")[:500])
-        pos = store.get_position(slug)
-        if pos is None:
-            store.add_position(slug, note="Added from the Final list. The first offer goes in at the next check.",
-                               source="final")
-        elif pos["status"] == "removed":
-            store.add_position(slug)
+        stores = [store] + ([self._sim_store_b()] if self._sim_config().simulation.strategy_b.enabled else [])
+        for st in stores:
+            pos = st.get_position(slug)
+            if pos is None:
+                st.add_position(slug, note="Added from the Final list. The first offer goes in at the next check.",
+                                source="final")
+            elif pos["status"] == "removed":
+                st.add_position(slug)
         self._send_json({"success": True})
 
     def _collection_exists(self, slug: str) -> bool:
@@ -881,7 +936,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         if not slug:
             self._send_json({"error": "Enter an OpenSea collection link or name."}, status=400)
             return
-        store = self._sim_store()
+        store, cfg = self._sim_store(), self._sim_config()
+        store_b = self._sim_store_b() if cfg.simulation.strategy_b.enabled else None
         if action == "add":
             existing = store.get_position(slug)
             if existing and existing["status"] != "removed":
@@ -890,17 +946,25 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             if not self._collection_exists(slug):
                 return
             store.add_position(slug)
+            if store_b is not None:
+                store_b.add_position(slug)
             self._send_json({"success": True, "position": store.get_position(slug)})
             return
         pos = store.get_position(slug)
         if pos is None:
             self._send_json({"error": "That collection isn't in the simulation."}, status=404)
             return
-        closing = None
-        if action == "remove" and pos["entry_price"] is not None:
+        discount = cfg.trade_model.target_sale_discount_from_floor_pct
+
+        def closing_for(p):
             # A bought item that never sold still counts: valued as if sold under today's floor
-            closing = closing_trade(pos, self._sim_config().trade_model.target_sale_discount_from_floor_pct)
-        self._send_json({"success": True, "position": store.set_status(slug, action, closing_trade=closing)})
+            return closing_trade(p, discount) if action == "remove" and p["entry_price"] is not None else None
+
+        result = store.set_status(slug, action, closing_trade=closing_for(pos))
+        pos_b = store_b.get_position(slug) if store_b is not None else None
+        if pos_b is not None and pos_b["status"] != "removed":
+            store_b.set_status(slug, action, closing_trade=closing_for(pos_b))  # both strategies follow the button
+        self._send_json({"success": True, "position": result})
 
     # ------------------------------------------------------------------
     # Logs
