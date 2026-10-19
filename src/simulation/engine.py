@@ -40,6 +40,8 @@ SALE_LOOKBACK_SECONDS = 1800
 # At most this many "was it an accepted offer?" OpenSea look-ups per collection per check (answers are saved,
 # so strategy B reuses A's)
 ORDER_LOOKUPS_PER_CHECK = 8
+# Missed-fill counting only looks orders up while this many are left, so fills and sales always have look-ups
+LOOKUPS_KEPT_FOR_FILLS = 4
 # "Contested" = outbid within this long; "quiet" = holding the best offer unchallenged for this long
 CONTESTED_WINDOW_SECONDS = 86400
 # A check may run this much early (the bot's loop doesn't land exactly on time)
@@ -250,6 +252,7 @@ class MarketView:
         self._sales: Optional[List[SaleEvent]] = None
         self._sales_after: Optional[int] = None
         self._sales_complete = True
+        self._sales_failed = False
 
     def _get(self, key, fetch):
         if key not in self._memo:
@@ -268,6 +271,8 @@ class MarketView:
 
     def sales(self, after: int) -> Tuple[Optional[List[SaleEvent]], bool]:
         """Sales at or after `after`, and whether the download was complete. None = it failed (retry next check)."""
+        if self._sales_failed:
+            return None, False  # failed once this check: the whole window is retried at the next one
         if self._sales is None or self._sales_after is None or after < self._sales_after:
             fetch_all = getattr(self.provider, "get_sale_events_since", None)
             if fetch_all is not None:
@@ -275,6 +280,7 @@ class MarketView:
             else:
                 sales, complete = self.provider.get_sale_events(self.slug, after_timestamp=after, max_pages=10), True
             if sales is None:
+                self._sales_failed = True
                 return None, False
             self._sales, self._sales_after, self._sales_complete = list(sales), after, complete
         return [e for e in self._sales if e.event_timestamp >= after], self._sales_complete
@@ -465,20 +471,19 @@ class PaperTrader:
                 except OpenSeaNetworkError:
                     raise
                 except SimDataError as e:
-                    self._note_problem(book, pos, str(e))
+                    self._note_problem(book, pos, str(e), now)
                 except Exception as e:  # one collection's problem must not stop the others or the bot
                     logger.exception("Simulation check failed for %s (strategy %s)", slug, book.strategy)
-                    self._note_problem(book, pos, f"Check failed: {e}")
+                    self._note_problem(book, pos, f"Check failed: {e}", now)
             done += checked
         self.seed(now)  # act on sales made this check (a leaving collection, a Final list trial) straight away
         return done
 
-    def _note_problem(self, book: Book, pos: Dict[str, Any], message: str) -> None:
-        if pos.get("note") == message:
-            return
-        p = dict(pos)
-        p["note"] = message
-        book.store.save_round(p, pos["rev"] or 0, events=[(int(time.time()), pos["slug"], "problem", message)])
+    def _note_problem(self, book: Book, pos: Dict[str, Any], message: str, now: int) -> None:
+        # The attempt counts as this check, so a failing collection is retried at its normal pace
+        p = dict(pos, note=message, last_tick_at=now)
+        new = pos.get("note") != message
+        book.store.save_round(p, pos["rev"] or 0, events=[(now, pos["slug"], "problem", message)] if new else ())
 
     # ------------------------------------------------------------------
     def _load_costs(self, p: Dict[str, Any], currency: str, market: MarketView) -> None:
@@ -659,6 +664,9 @@ class PaperTrader:
         ref_floor = t["floor"] or floor
         if not ref_floor or price >= ref_floor:
             return False  # at or above the floor: someone bought a listing
+        cached = ev.order_hash and self.state_store.get_sale_orders([ev.order_hash]).get(ev.order_hash)
+        if not cached and budget[0] <= LOOKUPS_KEPT_FOR_FILLS:
+            return False  # a busy check: the count is best effort, a fill is not
         kind, offer_type = self._order(ev, budget)
         if kind == "pending":
             return True
@@ -728,9 +736,12 @@ class PaperTrader:
         cur, prev, prev_state = p["currency"], p.get("bid"), p.get("bid_state")
         gap_value = self.gap_for(book, p)
         bid, state, limit = decide_bid(top, floor, costs, gap_value, self.sim.outbid_step_pct, prev)
+        stepped = False
         if book.strategy == "B":
+            before = gap_value
             bid, state, limit, gap_value = self._step_down(p, top, floor, costs, now, bid, state, limit, gap_value,
                                                            say)
+            stepped = gap_value != before
         gap = f"{gap_value:g}%"
         if p.get("round_started_at") is None:
             p["round_started_at"] = now
@@ -759,7 +770,7 @@ class PaperTrader:
                 say("capped", f"Outbid: someone offered {fmt_price(top, cur)}, above our limit. Holding at "
                               f"{fmt_price(bid, cur)}, the most that keeps the floor {gap} above.")
             elif state == "capped":
-                if abs(bid - prev) / prev >= 0.01:
+                if abs(bid - prev) / prev >= 0.01 and not stepped:  # a step-down already said why
                     say("limit", f"Floor moved to {fmt_price(floor, cur)}, so our limit is now {fmt_price(bid, cur)}.")
             elif prev_state == "capped":
                 say("top", f"Back on top at {fmt_price(bid, cur)} (best other offer {fmt_price(top, cur)}).")

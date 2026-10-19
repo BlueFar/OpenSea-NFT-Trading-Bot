@@ -67,10 +67,11 @@ class SimStore:
             have = {r[1] for r in c.execute(f"PRAGMA table_info({self.T_POS})")}
             for col, kind in LATER_COLUMNS:
                 if col not in have:
-                    c.execute(f"ALTER TABLE {self.T_POS} ADD COLUMN {col} {kind}")
-            if "last_outbid_at" not in have and {"times_outbid", "last_tick_at"} <= have:
-                # Offers outbid before this was recorded count as contested from their last check
-                c.execute(f"UPDATE {self.T_POS} SET last_outbid_at=last_tick_at WHERE times_outbid > 0")
+                    try:
+                        c.execute(f"ALTER TABLE {self.T_POS} ADD COLUMN {col} {kind}")
+                    except sqlite3.OperationalError as e:  # the bot and the dashboard upgrading at once
+                        if "duplicate column" not in str(e):
+                            raise
             # What the market and our offer or listing looked like at each check
             c.execute(f"""
                 CREATE TABLE IF NOT EXISTS {self.T_TICKS} (
@@ -246,7 +247,8 @@ class SimStore:
             fields = {"status": status, "note": None, "updated_at": now, "auto_stopped": 0, "leaving": 0}
             if action == "start" and status == "bidding":
                 # A fresh offer: sales from while it was stopped don't count
-                fields.update({"bid": None, "bid_state": None, "round_started_at": None, "last_sale_check": None})
+                fields.update({"bid": None, "bid_state": None, "round_started_at": None, "last_sale_check": None,
+                               "capped_since": None})
             if action == "start" and status == "holding":
                 fields.update({"listed_at": None, "ask": None, "last_sale_check": None})
             if action == "remove" and closing_trade:

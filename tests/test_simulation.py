@@ -863,7 +863,8 @@ def test_older_databases_get_strategy_b_and_the_contested_columns(tmp_path):
         c.execute("INSERT INTO sim_positions (slug, status, times_outbid, last_tick_at) VALUES ('a', 'bidding', 2, 111)")
         c.execute("INSERT INTO sim_positions (slug, status, times_outbid, last_tick_at) VALUES ('b', 'bidding', 0, 222)")
     a = SimStore(db)
-    assert a.get_position("a")["last_outbid_at"] == 111 and a.get_position("b")["last_outbid_at"] is None
+    # No guessing when old offers were outbid: the faster checks start from the next real outbid
+    assert a.get_position("a")["last_outbid_at"] is None and a.get_position("a")["last_tick_at"] == 111
     assert a.get_position("a")["missed_fills"] == 0
     b = SimStore(db, strategy="B")
     assert b.get_positions() == [] and a.get_position("a")["status"] == "bidding"
@@ -911,3 +912,51 @@ def test_dashboard_shows_and_controls_both_strategies(tmp_path):
 
         assert _call("POST", "/api/simulation/remove", env, {"slug": "smol-brains"})[0] == 200
         assert a.get_position("smol-brains")["status"] == b.get_position("smol-brains")["status"] == "removed"
+
+
+def test_strategy_b_restarts_its_day_at_the_limit_after_stop_and_start(tmp_path):
+    m = FakeMarket()
+    t, _ = _trader_b(tmp_path, m)
+    t0 = int(time.time()) - 10 * 86400
+    t.tick(now=t0)
+    m.top = 0.09
+    t.tick(now=t0 + 300)
+    for st in (t.store, t.store_b):
+        st.set_status("kongz", "stop")
+        st.set_status("kongz", "start")
+    t.tick(now=t0 + 3 * 86400)
+    b = t.store_b.get_position("kongz")
+    assert b["limit_pct"] is None and b["capped_since"] == t0 + 3 * 86400
+    t.tick(now=t0 + 4 * 86400)
+    b = t.store_b.get_position("kongz")
+    assert b["limit_pct"] == 35.0
+    assert not any(e["kind"] == "limit" for e in t.store_b.get_events())  # the step-down says why, once
+
+
+def test_missed_fill_look_ups_leave_room_for_a_real_fill(tmp_path):
+    m = FakeMarket()
+    t, _ = _trader(tmp_path, m)
+    t0 = int(time.time()) - 20000
+    t.tick(now=t0)
+    m.top = 0.09
+    t.tick(now=t0 + 60)                            # capped at ~0.0725
+    for i in range(12):                            # others' collection offers taken, above ours
+        m.sale(t0 + 100 + i, 0.085, order_hash=f"0xo{i}")
+        m.orders[f"0xo{i}"] = {"kind": "offer", "offer_type": "collection"}
+    m.sale(t0 + 200, 0.05, order_hash="0xours")   # far under our offer, an accepted collection offer
+    m.orders["0xours"] = {"kind": "offer", "offer_type": "collection"}
+    t.tick(now=t0 + 300)
+    p = t.store.get_position("kongz")
+    assert p["status"] == "holding" and p["entry_at"] == t0 + 200
+    assert p["missed_above_limit"] == ORDER_LOOKUPS_PER_CHECK - 4 and m.order_lookups <= ORDER_LOOKUPS_PER_CHECK
+
+
+def test_a_failing_collection_is_retried_at_its_normal_pace(tmp_path):
+    m = FakeMarket()
+    t, _ = _trader(tmp_path, m)
+    t0 = int(time.time()) - 20000
+    m.get_collection = lambda slug: None
+    t.tick(now=t0, only_due=True)
+    assert t.store.get_position("kongz")["last_tick_at"] == t0
+    assert t.tick(now=t0 + 300, only_due=True) == 0
+    assert len([e for e in t.store.get_events() if e["kind"] == "problem"]) == 1
