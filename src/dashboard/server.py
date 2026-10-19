@@ -17,6 +17,7 @@ from ..collectors.orchestrator import CollectionEvaluator
 from ..collectors.chain_volume import summarize as summarize_chain_volume
 from ..runtime import control, launchd
 from ..simulation.engine import check_interval, closing_trade, describe_position
+from ..simulation.record import track_record
 from ..simulation.store import SimStore
 from ..runtime.control import BotProcessManager, PID_FILE, LOG_FILE, WORKSPACE_ROOT  # noqa: F401 (re-exported)
 from ..utils.logging import setup_logger
@@ -740,12 +741,15 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         last = store.get_last_events()
         b_on = cfg.simulation.strategy_b.enabled
         b_pos = {p["slug"]: p for p in store_b.get_positions()} if b_on else {}
+        by_slug, by_slug_b = self._trades_by_slug(store), self._trades_by_slug(store_b) if b_on else {}
         positions = []
         for p in store.get_positions():
             d = dict(describe_position(p, discount), last_event=last.get(p["slug"]),
-                     check_every=check_interval(p, cfg.simulation, now))
+                     check_every=check_interval(p, cfg.simulation, now),
+                     record=track_record(p, by_slug.get(p["slug"], []), discount, now))
             if p["slug"] in b_pos:
-                d["b"] = describe_position(b_pos[p["slug"]], discount)
+                d["b"] = dict(describe_position(b_pos[p["slug"]], discount),
+                              record=track_record(b_pos[p["slug"]], by_slug_b.get(p["slug"], []), discount, now))
                 if b_pos[p["slug"]]["status"] in ("bidding", "holding"):
                     # The bot checks a collection when either strategy is due
                     d["check_every"] = min(d["check_every"], check_interval(b_pos[p["slug"]], cfg.simulation, now))
@@ -825,7 +829,16 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             slug = slug.split("opensea.io/collection/")[-1]
         return slug.split("?")[0].split("#")[0].strip("/ ").lower()
 
+    @staticmethod
+    def _trades_by_slug(store: SimStore) -> Dict[str, List[Dict[str, Any]]]:
+        out: Dict[str, List[Dict[str, Any]]] = {}
+        for t in store.get_trades(limit=10000):
+            out.setdefault(t["slug"], []).append(t)
+        return out
+
     def _handle_get_final(self):
+        import time
+        now = int(time.time())
         cfg = self._sim_config()
         store = self._sim_store()
         discount = cfg.trade_model.target_sale_discount_from_floor_pct
@@ -859,20 +872,23 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 "last_event": last.get(f["slug"]), "last_tick_at": d.get("last_tick_at"),
                 "trial_state": d.get("trial_state"), "trial_started_at": d.get("trial_started_at"),
                 "missed_fills": d.get("missed_fills") or 0, "missed_above_limit": d.get("missed_above_limit") or 0,
-                "b": self._final_b(positions_b.get(f["slug"]), trades_b.get(f["slug"], []), discount) if b_on else None,
+                "record": track_record(pos, trades, discount, now) if pos else None,
+                "b": self._final_b(positions_b.get(f["slug"]), trades_b.get(f["slug"], []), discount, now) if b_on else None,
             })
         self._send_json({"items": items, "interval_seconds": cfg.simulation.interval_seconds,
                          "min_profit_gap_pct": cfg.simulation.min_profit_gap_pct, "strategy_b": b_on})
 
     @staticmethod
-    def _final_b(pos: Optional[Dict[str, Any]], trades: List[Dict[str, Any]], discount: float) -> Dict[str, Any]:
+    def _final_b(pos: Optional[Dict[str, Any]], trades: List[Dict[str, Any]], discount: float,
+                 now: int) -> Dict[str, Any]:
         """Strategy B's result for one Final list collection."""
         d = describe_position(pos, discount) if pos else {}
         held = d.get("entry_price") is not None and d.get("status") != "removed"
         return {"status": d.get("status"), "bid": d.get("bid"), "bid_state": d.get("bid_state"), "ask": d.get("ask"),
                 "limit_pct": d.get("limit_pct"), "entry_price": d.get("entry_price") if held else None,
                 "now_net": d.get("now_net") if held else None, "trades": len(trades),
-                "realised_net": sum(t["net"] or 0 for t in trades) if trades else None}
+                "realised_net": sum(t["net"] or 0 for t in trades) if trades else None,
+                "record": track_record(pos, trades, discount, now) if pos else None}
 
     def _handle_final_action(self, action: str):
         if action not in ("add", "remove"):

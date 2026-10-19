@@ -71,6 +71,48 @@
       (extra ? " · " + esc(extra) : "") + "</p>";
   }
 
+  // Track record: does our offer get taken, does the item sell quickly, does it make money
+  var VERDICTS = { proven: ["Proven", "good"], not_yet: ["Not proven yet", "neutral"], slow: ["Slow", "warn"], losing: ["Losing", "bad"] };
+  var VERDICT_RANK = { proven: 0, not_yet: 1, slow: 2, losing: 3 };
+  function verdictPill(rec) {
+    if (!rec) return "";
+    var v = VERDICTS[rec.verdict] || [rec.verdict, "neutral"];
+    return '<span class="pill ' + v[1] + '" title="' + esc(rec.why) + '">' + esc(v[0]) + "</span>";
+  }
+  function days(n) { return isNum(n) ? (n < 1 ? fmt(n * 24, 0) + " h" : fmt(n, 1) + " d") : "–"; }
+
+  function renderRecord(d) {
+    var box = $("simRecord"), pos = (d.positions || []).filter(function (p) { return p.record; });
+    if (!pos.length) { box.hidden = true; return; }
+    pos.sort(function (x, y) {
+      var a = x.record, b = y.record;
+      return (VERDICT_RANK[a.verdict] - VERDICT_RANK[b.verdict]) || ((b.roi_per_day || 0) - (a.roi_per_day || 0)) ||
+        ((b.fills_per_week || 0) - (a.fills_per_week || 0)) || String(x.name || x.slug).localeCompare(String(y.name || y.slug));
+    });
+    var counts = {};
+    pos.forEach(function (p) { counts[p.record.verdict] = (counts[p.record.verdict] || 0) + 1; });
+    var sub = ["proven", "not_yet", "slow", "losing"].filter(function (k) { return counts[k]; })
+      .map(function (k) { return counts[k] + " " + VERDICTS[k][0].toLowerCase(); }).join(" · ");
+    box.hidden = false;
+    box.innerHTML = '<div class="section-title"><h2>Track record</h2><span>' + esc(sub) + "</span></div>" +
+      '<p class="chart-note" style="margin:0 0 10px">Proven: ' + "2 or more sales, none at a loss, and in profit overall. Losing: down overall (items held valued at today's floor) after a losing trade, or with an item held 3 days or more below what it cost. " +
+      "Slow: no fill in 14 days of bidding. These are strategy A's results" + (bOn() ? "; B's verdict is shown beside it." : ".") + "</p>" +
+      '<div class="tbl-scroll"><table class="tbl sim-trades sim-record-tbl"><thead><tr><th>Collection</th><th>Verdict</th>' +
+      '<th title="Fills for each week our offer was up">Fills a week</th><th title="Average time from buying to selling">Days to sell</th>' +
+      '<th title="Average profit a sale, after fees and gas">Profit a sale</th><th title="Sales so far, plus items held valued at today\'s floor">Profit so far</th></tr></thead><tbody>' +
+      pos.map(function (p) {
+        var r = p.record, b = p.b && p.b.record;
+        function cell(label, html) { return '<td data-l="' + label + '"><span class="cv">' + html + "</span></td>"; }
+        return "<tr><td>" + osLink(p.slug, p.name || p.slug) + '<div class="sub">' + esc(r.why) + (r.underwater && r.why.indexOf("down") < 0 ? " · item held below break-even" : "") + "</div></td>" +
+          cell("Verdict", verdictPill(r) + (bOn() && b ? '<span class="sub nowrap">' + bTag() + esc((VERDICTS[b.verdict] || [b.verdict])[0]) + "</span>" : "")) +
+          cell("Fills a week", (isNum(r.fills_per_week) ? fmt(r.fills_per_week, 1) : "–") + '<span class="sub nowrap">' + r.fills + (r.fills === 1 ? " fill" : " fills") + " in " + days(r.bid_days) + "</span>") +
+          cell("Days to sell", days(r.days_to_sell)) +
+          cell("Profit a sale", (isNum(r.roi_per_trade) ? (r.roi_per_trade >= 0 ? "+" : "") + fmt(r.roi_per_trade, 0) + "%" : "–") +
+            (isNum(r.roi_per_day) ? '<span class="sub nowrap">' + fmt(r.roi_per_day, 1) + "% a day held</span>" : "")) +
+          cell("Profit so far", isNum(r.total_net) ? profitHtml(r.total_net, null, r.currency) : "–") + "</tr>";
+      }).join("") + "</tbody></table></div>";
+  }
+
   // A Final list pick that stopped passing gets one simulated round (7 days at most) to show a profit
   function trialText(p) {
     if (p.trial_state === "on") return "stopped passing: on trial until its round ends" +
@@ -245,6 +287,7 @@
       '<div class="card stat"><span class="stat-label">Profit so far' + (bOn() ? " (A)" : "") + '</span><span class="stat-value num ' + (isNum(all.usd) && all.usd < 0 ? "c-bad" : all.any ? "c-good" : "") + '">' + esc(all.text) + '</span><span class="stat-sub">' + esc(profitSub) + "</span></div>";
 
     renderCompare(d);
+    renderRecord(d);
 
     // Rules in plain words, from the current settings
     if ($("simRules").contains(document.activeElement)) return renderRest();
@@ -353,12 +396,14 @@
     var stateLine = !f.status ? "Not in the simulation yet" : held ? "Bought for " + N.moneyText(f.entry_price, cur) + (isNum(f.ask) ? ", listed at " + N.moneyText(f.ask, cur) : "") :
       isNum(f.bid) ? "Our offer " + N.moneyText(f.bid, cur) + (isNum(f.competitor_top) ? " · best other " + N.moneyText(f.competitor_top, cur) : "") + (isNum(f.floor) ? " · floor " + N.moneyText(f.floor, cur) : "") : "Waiting for the first check";
     if (missedText(f)) stateLine += " · " + missedText(f);
+    var rec = f.record, recLine = rec ? '<p class="fin-record">' + verdictPill(rec) + " " + esc(rec.why) +
+      (finData && finData.strategy_b && f.b && f.b.record ? ' <span class="muted">· ' + bTag() + esc((VERDICTS[f.b.record.verdict] || [f.b.record.verdict])[0]) + "</span>" : "") + "</p>" : "";
     return '<div class="fin-row">' + N.art(f.slug, f.image) +
       '<div class="fin-main"><div class="cand-name"><span>' + osLink(f.slug, f.name || f.slug) + "</span></div>" +
       '<div class="cand-meta">' + esc([N.chainName(f.chain), f.added_by === "claude" ? "added by Claude" : "added by you"].filter(Boolean).join(" · ")) + "</div>" +
       (f.note ? '<p class="fin-note">' + esc(f.note) + "</p>" : "") +
       (trialText(f) ? '<p class="fin-trial ' + (f.trial_state === "on" ? "c-warn" : "c-good") + '">' + esc(N.cap(trialText(f))) + "</p>" : "") +
-      '<p class="fin-state">' + esc(stateLine) + "</p>" +
+      '<p class="fin-state">' + esc(stateLine) + "</p>" + recLine +
       (f.last_event ? '<p class="sim-last"><span class="muted">' + esc(N.ago(f.last_event.ts)) + ":</span> " + esc(f.last_event.message) + "</p>" : "") + "</div>" +
       '<div class="fin-side">' + (f.status ? statusPill(f) : '<span class="pill neutral">Not simulated</span>') +
       finProfit(withB ? "Strategy A profit" : "Simulation profit", f, cur) +

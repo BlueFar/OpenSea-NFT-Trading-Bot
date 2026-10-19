@@ -461,16 +461,22 @@ h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
 .tag-b { display: inline-block; font-size: 10.5px; font-weight: 700; line-height: 1.5; padding: 0 5px; margin-right: 6px; border-radius: 4px;
   color: var(--accent); background: color-mix(in srgb, var(--accent) 13%, var(--surface)); vertical-align: 1px; }
 .sim-compare .tbl td strong { font-weight: 600; }
+.sim-record-tbl td .sub { white-space: normal; }
+.sim-record-tbl .cv { display: inline-flex; flex-direction: column; align-items: flex-end; }
+.sim-record-tbl .cv .sub { display: block; }
+.sim-record-tbl .sub.nowrap { white-space: nowrap; }
+.sim-record-tbl td:first-child { min-width: 220px; }
+.fin-record { margin: 6px 0 0; font-size: 13px; line-height: 1.5; color: var(--muted); }
 @media (max-width: 600px) {
   /* Each strategy becomes a small block of label: value lines */
-  .sim-compare .tbl.sim-trades, .sim-compare .tbl.sim-trades tbody, .sim-compare .tbl.sim-trades tr, .sim-compare .tbl.sim-trades td { display: block; }
-  .sim-compare .tbl.sim-trades thead { display: none; }
-  .sim-compare .tbl.sim-trades tr { padding: 10px 0; border-top: 1px solid var(--line); }
-  .sim-compare .tbl.sim-trades tbody tr:first-child td { border-top: 0; }
-  .sim-compare .tbl.sim-trades td { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; border: 0; white-space: normal; }
-  .sim-compare .tbl.sim-trades td:first-child { display: block; padding-bottom: 6px; }
-  .sim-compare .tbl.sim-trades td::before { content: attr(data-l); color: var(--muted); font-size: 12.5px; }
-  .sim-compare .tbl.sim-trades td:first-child::before { content: none; }
+  .sim-stack .tbl.sim-trades, .sim-stack .tbl.sim-trades tbody, .sim-stack .tbl.sim-trades tr, .sim-stack .tbl.sim-trades td { display: block; }
+  .sim-stack .tbl.sim-trades thead { display: none; }
+  .sim-stack .tbl.sim-trades tr { padding: 10px 0; border-top: 1px solid var(--line); }
+  .sim-stack .tbl.sim-trades tbody tr:first-child td { border-top: 0; }
+  .sim-stack .tbl.sim-trades td { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; border: 0; white-space: normal; }
+  .sim-stack .tbl.sim-trades td:first-child { display: block; padding-bottom: 6px; }
+  .sim-stack .tbl.sim-trades td::before { content: attr(data-l); color: var(--muted); font-size: 12.5px; }
+  .sim-stack .tbl.sim-trades td:first-child::before { content: none; }
 }
 .sim-btns { display: flex; gap: 6px; }
 .sim-btns .btn { padding: 5px 10px; font-size: 12.5px; }

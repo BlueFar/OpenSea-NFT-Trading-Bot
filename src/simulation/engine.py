@@ -15,6 +15,7 @@ Two strategies run side by side on the same market data (one set of OpenSea call
 min_profit_gap_pct limit; B starts there and lowers its limit step by step while it sits capped without a fill.
 Collections where we were outbid in the last day are checked more often, quiet ones less often.
 """
+import json
 import math
 import time
 from dataclasses import dataclass
@@ -26,7 +27,7 @@ from ..models.collection import SaleEvent
 from ..providers.opensea.client import OpenSeaNetworkError
 from ..trade_model.calculator import extract_fees_from_collection
 from ..utils.logging import setup_logger
-from .store import ACTIVE_STATUSES, SimStore
+from .store import ACTIVE_STATUSES, MAX_CHECK_GAP_SECONDS, SimStore
 
 logger = setup_logger("simulation")
 
@@ -211,7 +212,8 @@ def closing_trade(pos: Dict[str, Any], exit_discount_pct: float, now: Optional[i
     r = trade_result(entry, exit_price, costs)
     return {"slug": pos["slug"], "round": pos.get("round"), "currency": pos.get("currency"),
             "entry_price": entry, "entry_at": pos.get("entry_at"), "entry_tx": pos.get("entry_tx"),
-            "entry_token": pos.get("entry_token"), "exit_price": exit_price, "exit_at": int(now or time.time()),
+            "entry_token": pos.get("entry_token"), "entry_metrics": pos.get("entry_metrics"),
+            "exit_price": exit_price, "exit_at": int(now or time.time()),
             "exit_tx": None, "fees": r["fees"], "gas": r["gas"], "net": r["net"], "roi_pct": r["roi_pct"],
             "times_outbid": pos.get("times_outbid") or 0, "how": "removed"}
 
@@ -222,6 +224,11 @@ def closing_trade(pos: Dict[str, Any], exit_discount_pct: float, now: Optional[i
 class SimDataError(Exception):
     """OpenSea didn't return what a check needs; the position is left as it was."""
 
+
+# The bot's measurements saved with each fill (see PaperTrader._bot_metrics)
+BOT_METRIC_KEYS = {"spread", "listed_pct", "listed", "sales_7d", "sales_daily", "move_1d", "move_7d", "floor_1d",
+                   "floor_7d", "owners", "supply", "pace", "roi", "net", "floor", "offer", "royalty_pct", "fee_pct",
+                   "bid_premium_pct", "trading_frequency", "verified", "created_date", "chain"}
 
 TRIAL_DAYS = 7  # longest a Final list pick that stopped passing gets to finish its trial round
 
@@ -508,6 +515,22 @@ class PaperTrader:
             "gas": gas_estimate(chain, currency, overrides=tm.chain_gas, ethereum_default=tm.gas_estimate_eth),
         })
 
+    def _bot_metrics(self, slug: str) -> Optional[str]:
+        """
+        What the bot's own check measured for this collection most recently (spread, listed %, sales pace,
+        floor moves, ...), saved with each fill so winners and losers can later be compared on them.
+        """
+        try:
+            r = self.state_store.get_result(slug)
+        except Exception:
+            return None
+        if not r:
+            return None
+        d = r.get("details") or {}
+        keep = {k: v for k, v in d.items() if k in BOT_METRIC_KEYS and isinstance(v, (int, float, str, bool))}
+        keep.update(checked_on=r.get("date_str"), passed=bool(r.get("is_pass")), rule=r.get("reject_filter"))
+        return json.dumps(keep, default=str)
+
     def _order(self, ev: SaleEvent, budget: List[int]) -> Tuple[Optional[str], Optional[str]]:
         """
         (kind, offer_type) from OpenSea's order for the sale, saved answers first. kind is "offer", "listing",
@@ -544,6 +567,9 @@ class PaperTrader:
             events.append((now, slug, kind, message))
 
         p["note"] = None  # only a problem is kept here; a check that gets this far has none
+        if pos["status"] == "bidding" and pos.get("last_tick_at"):
+            # Time with an offer up since the last check (the track record's fills per week of bidding)
+            p["bid_seconds"] = (p.get("bid_seconds") or 0) + min(now - pos["last_tick_at"], MAX_CHECK_GAP_SECONDS)
 
         stats = market.stats()  # a fresh floor, not the evaluator's
         floor = stats.floor_price if stats and stats.floor_price and stats.floor_price > 0 else None
@@ -624,7 +650,8 @@ class PaperTrader:
                 pending = verdict == "pending"
                 if verdict == "fill":
                     p.update({"status": "holding", "entry_price": t["bid"], "entry_at": ev.event_timestamp,
-                              "entry_tx": ev.transaction, "entry_token": ev.token_id, "ask": None, "listed_at": None})
+                              "entry_tx": ev.transaction, "entry_token": ev.token_id, "ask": None, "listed_at": None,
+                              "entry_metrics": self._bot_metrics(slug)})
                     say("filled", f"Offer filled: bought #{ev.token_id or '?'} for {fmt_price(t['bid'], cur)}. "
                                   f"A seller sold one for {fmt_price(price, cur)}, less than our offer, "
                                   f"so ours would have been taken.")
@@ -702,7 +729,8 @@ class PaperTrader:
         trades.append({
             "slug": p["slug"], "round": p["round"], "currency": cur,
             "entry_price": p["entry_price"], "entry_at": p["entry_at"], "entry_tx": p["entry_tx"],
-            "entry_token": p["entry_token"], "exit_price": ask, "exit_at": ev.event_timestamp,
+            "entry_token": p["entry_token"], "entry_metrics": p.get("entry_metrics"),
+            "exit_price": ask, "exit_at": ev.event_timestamp,
             "exit_tx": ev.transaction, "fees": r["fees"], "gas": r["gas"], "net": r["net"],
             "roi_pct": r["roi_pct"], "times_outbid": p.get("times_outbid") or 0, "how": "sold",
         })
@@ -721,15 +749,15 @@ class PaperTrader:
         if p.get("leaving"):
             say("remove", "Off the Candidates list, so it leaves the simulation now the item has sold.")
             p.update({"status": "removed", "auto_stopped": 1, "leaving": 0, "entry_price": None, "entry_at": None,
-                      "entry_tx": None, "entry_token": None, "ask": None, "listed_at": None})
+                      "entry_tx": None, "entry_token": None, "ask": None, "listed_at": None, "entry_metrics": None})
         elif self.sim.repeat:
             p.update({"status": "bidding", "round": (p["round"] or 1) + 1, "bid": None, "bid_state": None,
                       "competitor_top": None, "max_bid": None, "times_outbid": 0, "highest_bid": None,
                       "entry_price": None, "entry_at": None, "entry_tx": None, "entry_token": None,
-                      "ask": None, "listed_at": None, "round_started_at": None})
+                      "ask": None, "listed_at": None, "round_started_at": None, "entry_metrics": None})
         else:
             p.update({"status": "stopped", "entry_price": None, "entry_at": None, "entry_tx": None,
-                      "entry_token": None, "ask": None, "listed_at": None})
+                      "entry_token": None, "ask": None, "listed_at": None, "entry_metrics": None})
 
     def _update_bid(self, book: Book, p: Dict[str, Any], top: Optional[float], floor: Optional[float],
                     costs: Costs, now: int, say) -> None:

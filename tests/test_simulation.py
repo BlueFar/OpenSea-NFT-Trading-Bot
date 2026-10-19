@@ -960,3 +960,102 @@ def test_a_failing_collection_is_retried_at_its_normal_pace(tmp_path):
     assert t.store.get_position("kongz")["last_tick_at"] == t0
     assert t.tick(now=t0 + 300, only_due=True) == 0
     assert len([e for e in t.store.get_events() if e["kind"] == "problem"]) == 1
+
+
+# ----------------------------------------------------------------------
+# Track record
+# ----------------------------------------------------------------------
+def test_track_record_verdicts():
+    from src.simulation.record import track_record
+    now = 10 ** 9
+    base = {"slug": "x", "status": "bidding", "currency": "ETH", "fee_pct": 1.0, "royalty_pct": 5.0, "gas": 0.005,
+            "floor": 0.1088, "bid_seconds": 7 * 86400}
+
+    def sale(net, roi, held_days, how="sold"):
+        return {"how": how, "net": net, "roi_pct": roi, "entry_at": now - 10 * 86400,
+                "exit_at": now - 10 * 86400 + held_days * 86400, "currency": "ETH"}
+
+    r = track_record(base, [], 5.0, now)
+    assert (r["verdict"], r["fills"], r["fills_per_week"]) == ("not_yet", 0, 0.0) and "7.0 days" in r["why"]
+    assert track_record({**base, "bid_seconds": 15 * 86400}, [], 5.0, now)["verdict"] == "slow"
+
+    r = track_record(base, [sale(0.03, 50.0, 2), sale(0.01, 20.0, 1)], 5.0, now)
+    assert r["verdict"] == "proven" and r["sales"] == 2 and r["fills_per_week"] == 2.0
+    assert r["days_to_sell"] == 1.5 and r["roi_per_trade"] == 35.0 and r["roi_per_day"] == pytest.approx(70 / 3, abs=0.01)
+
+    one = track_record(base, [sale(0.03, 50.0, 2)], 5.0, now)
+    assert one["verdict"] == "not_yet" and "proven after 2" in one["why"]
+    assert track_record(base, [sale(0.03, 50.0, 2), sale(-0.04, -40.0, 3, how="removed")], 5.0, now)["verdict"] == "losing"
+
+    # Holding an item now worth less than it cost: not judged for a few days, then losing
+    held = {**base, "status": "holding", "entry_price": 0.1, "entry_at": now - 86400, "ask": 0.11}
+    r = track_record(held, [], 5.0, now)
+    assert r["verdict"] == "not_yet" and r["underwater"] and "down" in r["why"]
+    r = track_record({**held, "entry_at": now - 4 * 86400}, [], 5.0, now)
+    assert r["verdict"] == "losing" and "held for 4 days is down" in r["why"]
+    # ... worth more: not proven yet
+    r = track_record({**held, "entry_price": 0.05}, [], 5.0, now)
+    assert r["verdict"] == "not_yet" and "holding its first item" in r["why"] and r["fills"] == 1
+
+
+def test_bidding_time_and_the_bots_measurements_are_saved_with_each_trade(tmp_path):
+    m = FakeMarket()
+    t, state = _trader(tmp_path, m)
+    state.record_candidate("kongz", "2026-10-18", is_pass=True, reasons="PASS",
+                           details={"spread": 82.5, "listed_pct": 3.1, "sales_7d": 40, "rules": [{"x": 1}],
+                                    "info_md": "/secret/path"})
+    t0 = int(time.time()) - 20000
+    t.tick(now=t0)
+    t.tick(now=t0 + 900)
+    t.tick(now=t0 + 900 + 7200)                     # the bot was off: at most an hour counts
+    assert t.store.get_position("kongz")["bid_seconds"] == 900 + 3600
+    m.sale(t0 + 8200, 0.0596)
+    t.tick(now=t0 + 8400)
+    p = t.store.get_position("kongz")
+    assert p["status"] == "holding"
+    metrics = json.loads(p["entry_metrics"])
+    assert metrics == {"spread": 82.5, "listed_pct": 3.1, "sales_7d": 40, "checked_on": "2026-10-18",
+                       "passed": True, "rule": None}
+    m.sale(t0 + 8500, 0.11)
+    t.tick(now=t0 + 8700)
+    [trade] = t.store.get_trades()
+    assert json.loads(trade["entry_metrics"])["spread"] == 82.5
+    assert t.store.get_position("kongz")["entry_metrics"] is None
+
+
+def test_older_databases_get_their_bidding_time_from_the_checks_kept(tmp_path):
+    from src.simulation.store import POSITION_COLUMNS
+    db = str(tmp_path / "old.db")
+    old_cols = [c for c in POSITION_COLUMNS if c not in ("bid_seconds", "entry_metrics")]
+    with sqlite3.connect(db) as c:
+        c.execute(f"CREATE TABLE sim_positions ({', '.join(old_cols)}, PRIMARY KEY (slug))")
+        c.execute("CREATE TABLE sim_ticks (slug TEXT, ts INTEGER, round INTEGER, phase TEXT, bid REAL, "
+                  "competitor_top REAL, floor REAL, ask REAL, PRIMARY KEY (slug, ts))")
+        c.execute("CREATE TABLE sim_trades (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT, round INTEGER, "
+                  "currency TEXT, entry_price REAL, entry_at INTEGER, entry_tx TEXT, entry_token TEXT, exit_price REAL, "
+                  "exit_at INTEGER, exit_tx TEXT, fees REAL, gas REAL, net REAL, roi_pct REAL, times_outbid INTEGER, how TEXT)")
+        c.execute("INSERT INTO sim_trades (slug, net, how) VALUES ('a', 0.01, 'sold')")
+        c.execute("INSERT INTO sim_positions (slug, status) VALUES ('a', 'bidding')")
+        c.execute("INSERT INTO sim_positions (slug, status) VALUES ('b', 'bidding')")
+        for ts, phase in ((0, "bidding"), (900, "bidding"), (10000, "holding"), (10900, "bidding"), (11800, "bidding")):
+            c.execute("INSERT INTO sim_ticks (slug, ts, phase) VALUES ('a', ?, ?)", (ts, phase))
+    s = SimStore(db)
+    assert s.get_position("a")["bid_seconds"] == 900 + 3600 + 900   # holding stretch not counted; gap capped
+    assert s.get_position("b")["bid_seconds"] == 0
+    assert s.get_trades()[0]["entry_metrics"] is None
+    SimStore(db)                                                   # opening again doesn't count twice
+    assert s.get_position("a")["bid_seconds"] == 5400
+
+
+def test_dashboard_shows_the_track_record(tmp_path):
+    from src.dashboard.server import DashboardRequestHandler
+    env = _dash_env(tmp_path)
+    cfg_path, cfg, store, ev = env
+    DashboardRequestHandler.sim_store = DashboardRequestHandler.sim_store_b = None
+    with patch.object(DashboardRequestHandler, "config", cfg, create=True), \
+         patch.object(DashboardRequestHandler, "evaluator", ev, create=True):
+        assert _call("POST", "/api/final/add", env, {"slug": "smol-brains"})[0] == 200
+        [p] = _call("GET", "/api/simulation", env)[1]["positions"]
+        assert p["record"]["verdict"] == "not_yet" and p["b"]["record"]["verdict"] == "not_yet"
+        [item] = _call("GET", "/api/final", env)[1]["items"]
+        assert item["record"]["verdict"] == "not_yet" and item["b"]["record"]["fills"] == 0

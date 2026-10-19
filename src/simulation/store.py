@@ -13,12 +13,16 @@ POSITION_COLUMNS = (
     "round_started_at", "last_tick_at", "last_sale_check", "note", "created_at", "updated_at",
     "source", "auto_stopped", "leaving", "trial_round", "trial_state", "trial_started_at",
     "last_outbid_at", "missed_fills", "missed_above_limit", "limit_pct", "capped_since",
+    "bid_seconds", "entry_metrics",
 )
 # Added after the first release: (column, type) brought into older databases
 LATER_COLUMNS = (("leaving", "INTEGER DEFAULT 0"), ("trial_round", "INTEGER"), ("trial_state", "TEXT"),
                  ("trial_started_at", "INTEGER"), ("last_outbid_at", "INTEGER"),
                  ("missed_fills", "INTEGER DEFAULT 0"), ("missed_above_limit", "INTEGER DEFAULT 0"),
-                 ("limit_pct", "REAL"), ("capped_since", "INTEGER"))
+                 ("limit_pct", "REAL"), ("capped_since", "INTEGER"),
+                 ("bid_seconds", "REAL DEFAULT 0"), ("entry_metrics", "TEXT"))
+# Longest gap between two checks counted as time spent bidding (the bot may have been off)
+MAX_CHECK_GAP_SECONDS = 3600
 # Strategy A (the rules shown on the dashboard) keeps the original sim_ tables; strategy B, a second set of
 # virtual offers judged on the same market data, has its own copy under simb_.
 STRATEGY_PREFIX = {"A": "sim_", "B": "simb_"}
@@ -65,6 +69,7 @@ class SimStore:
                 )
             """)
             have = {r[1] for r in c.execute(f"PRAGMA table_info({self.T_POS})")}
+            new_cols = {col for col, _ in LATER_COLUMNS} - have
             for col, kind in LATER_COLUMNS:
                 if col not in have:
                     try:
@@ -91,6 +96,15 @@ class SimStore:
                     how TEXT
                 )
             """)
+            trade_cols = {r[1] for r in c.execute(f"PRAGMA table_info({self.T_TRADES})")}
+            if "entry_metrics" not in trade_cols:
+                try:
+                    c.execute(f"ALTER TABLE {self.T_TRADES} ADD COLUMN entry_metrics TEXT")
+                except sqlite3.OperationalError as e:
+                    if "duplicate column" not in str(e):
+                        raise
+            if "bid_seconds" in new_cols:
+                self._backfill_bid_seconds(c)
             # Plain-language log for the dashboard
             c.execute(f"""
                 CREATE TABLE IF NOT EXISTS {self.T_EVENTS} (
@@ -113,6 +127,19 @@ class SimStore:
             """)
             c.execute("CREATE TABLE IF NOT EXISTS sim_meta (key TEXT PRIMARY KEY, value TEXT)")
             conn.commit()
+
+    def _backfill_bid_seconds(self, c) -> None:
+        """Time spent bidding before it was counted, from the checks still kept (30 days)."""
+        try:
+            rows = c.execute(f"""
+                SELECT slug, SUM(MIN(gap, {MAX_CHECK_GAP_SECONDS})) FROM (
+                    SELECT slug, ts - LAG(ts) OVER w AS gap, LAG(phase) OVER w AS was
+                    FROM {self.T_TICKS} WINDOW w AS (PARTITION BY slug ORDER BY ts)
+                ) WHERE was='bidding' AND gap IS NOT NULL GROUP BY slug
+            """).fetchall()
+        except sqlite3.OperationalError:  # an SQLite without window functions: count from now on
+            return
+        c.executemany(f"UPDATE {self.T_POS} SET bid_seconds=? WHERE slug=?", [(s or 0, slug) for slug, s in rows])
 
     # ------------------------------------------------------------------
     # Final list and candidates
@@ -253,7 +280,7 @@ class SimStore:
                 fields.update({"listed_at": None, "ask": None, "last_sale_check": None})
             if action == "remove" and closing_trade:
                 fields.update({"entry_price": None, "entry_at": None, "entry_tx": None, "entry_token": None,
-                               "ask": None, "listed_at": None})
+                               "ask": None, "listed_at": None, "entry_metrics": None})
                 keys = list(closing_trade.keys())
                 conn.execute(f"INSERT INTO {self.T_TRADES} ({', '.join(keys)}) VALUES ({', '.join('?' * len(keys))})",
                              [closing_trade[k] for k in keys])
@@ -330,7 +357,8 @@ class SimStore:
 
     def get_trades(self, limit: int = 200) -> List[Dict[str, Any]]:
         cols = ("id", "slug", "round", "currency", "entry_price", "entry_at", "entry_tx", "entry_token",
-                "exit_price", "exit_at", "exit_tx", "fees", "gas", "net", "roi_pct", "times_outbid", "how")
+                "exit_price", "exit_at", "exit_tx", "fees", "gas", "net", "roi_pct", "times_outbid", "how",
+                "entry_metrics")
         with self._conn() as conn:
             rows = conn.execute(f"SELECT {', '.join(cols)} FROM {self.T_TRADES} ORDER BY exit_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(zip(cols, r)) for r in rows]
