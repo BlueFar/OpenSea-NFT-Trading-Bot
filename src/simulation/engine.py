@@ -233,8 +233,9 @@ class PaperTrader:
         - Settings file and Final list collections start once; removing one on the dashboard sticks.
         - include_candidates: every collection that passes the bot's rules is simulated. One that stops passing
           is removed at once, or after its bought item sells; it comes back if it passes again.
-        - A Final list pick that stops passing gets a trial: one more simulated round (TRIAL_DAYS at most).
-          A profit keeps it on the Final list; a loss or no finished round removes it from both.
+        - A Final list pick that stops passing gets a trial: one more simulated round (TRIAL_DAYS at most, longer
+          while a bought item is worth a profit at today's floor). A profit keeps it on the Final list; otherwise
+          it is removed from both.
         """
         now = int(now if now is not None else time.time())
         if self.sim.final_list:
@@ -308,6 +309,9 @@ class PaperTrader:
             if sales:
                 why = "its round made no profit"
             elif now - (pos.get("trial_started_at") or now) >= TRIAL_DAYS * 86400:
+                held = closing_trade(pos, discount, now) if pos.get("entry_price") is not None else None
+                if held and held["net"] > 0:
+                    continue  # a bought item worth a profit: judge the trial on its real sale, however long it takes
                 why = f"no round finished within {TRIAL_DAYS} days"
             else:
                 continue

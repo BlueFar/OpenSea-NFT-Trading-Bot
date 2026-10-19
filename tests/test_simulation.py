@@ -589,6 +589,8 @@ def test_final_list_pick_whose_trial_round_does_not_finish_in_time_is_removed_ev
     m, t, state, t0 = _holding(tmp_path, collections=[], include_candidates=True, final_list={"kongz": "pick"})
     _passing(state, "kongz", passes=False)
     t.seed(now=t0 + 350)
+    with sqlite3.connect(state.db_path) as c:  # the floor fell: the item is now worth a loss
+        c.execute("UPDATE sim_positions SET floor=0.06 WHERE slug='kongz'")
     t.seed(now=t0 + 350 + 6 * 86400)
     assert t.store.get_position("kongz")["status"] == "holding"
     t.seed(now=t0 + 350 + 7 * 86400)
@@ -600,6 +602,18 @@ def test_final_list_pick_whose_trial_round_does_not_finish_in_time_is_removed_ev
     # Not added back from the settings file or the Final list seed
     t.seed()
     assert t.store.get_position("kongz")["status"] == "removed"
+
+
+def test_a_trial_waits_past_the_deadline_for_an_item_worth_a_profit(tmp_path):
+    m, t, state, t0 = _holding(tmp_path, collections=[], include_candidates=True, final_list={"kongz": "pick"})
+    _passing(state, "kongz", passes=False)
+    t.seed(now=t0 + 350)
+    with sqlite3.connect(state.db_path) as c:  # bought at 0.0597; the floor rose to 0.2
+        c.execute("UPDATE sim_positions SET floor=0.2 WHERE slug='kongz'")
+    t.seed(now=t0 + 350 + 8 * 86400)
+    p = t.store.get_position("kongz")
+    assert p["status"] == "holding" and p["trial_state"] == "on"
+    assert [f["slug"] for f in t.store.get_final_list()] == ["kongz"]
 
 
 def test_final_list_trial_ends_if_it_passes_again(tmp_path):
