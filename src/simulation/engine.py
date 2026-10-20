@@ -809,14 +809,16 @@ class PaperTrader:
         if not p.get("sl_state"):
             p.update({"sl_state": "watch", "sl_since": now})
             if not crash:
-                say("watch", f"Floor {fmt_price(floor, cur)} is too low to sell at break-even "
-                             f"({fmt_price(be, cur)}). If it stays there {cfg.confirm_hours:g} hours, we sell at a loss.")
+                say("watch", f"Floor {fmt_price(floor, cur)} is too low for a profit: listing "
+                             f"{costs.exit_discount_pct:g}% under it would be below our break-even of "
+                             f"{fmt_price(be, cur)}. If it stays like this for {cfg.confirm_hours:g} hours, we sell "
+                             f"at a loss.")
         if p["sl_state"] == "watch" and (crash or now - (p.get("sl_since") or now) >= cfg.confirm_hours * 3600):
             p.update({"sl_state": "exit", "sl_started_at": now, "sl_reason": "crash" if crash else "below"})
             say("stoploss", (f"Stop-loss: the floor ({fmt_price(floor, cur)}) is {cfg.crash_pct:g}% or more under what "
                              f"we paid ({fmt_price(p['entry_price'], cur)}), so we sell now, lowering the price every "
                              f"{cfg.crash_step_hours:g} hours." if crash else
-                             f"Stop-loss: the floor has stayed too low for break-even for {cfg.confirm_hours:g} hours, "
+                             f"Stop-loss: the floor has stayed too low for a profit for {cfg.confirm_hours:g} hours, "
                              f"so we sell at a loss, lowering the price every {cfg.step_hours:g} hours."))
         elif p["sl_state"] == "exit" and crash and p.get("sl_reason") != "crash":
             p["sl_reason"] = "crash"
