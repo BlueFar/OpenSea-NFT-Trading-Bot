@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from ..models.collection import (
     CollectionMetadata,
     CollectionStats,
@@ -33,9 +33,17 @@ class CollectionDataProvider(ABC):
         pass
 
     @abstractmethod
-    def get_sale_events(self, slug: str, after_timestamp: int) -> Optional[List[SaleEvent]]:
+    def get_sale_events(self, slug: str, after_timestamp: int, **kwargs) -> Optional[List[SaleEvent]]:
         """Fetches sale events occurring after the given Unix epoch timestamp. Returns None if API fails."""
         pass
+
+    def get_order_info(self, chain: str, protocol_address: str, order_hash: str) -> Optional[Dict[str, Optional[str]]]:
+        """Whether a sale was a listing bought or an offer accepted. None = unknown (the default)."""
+        return None
+
+    def get_nft_rarity(self, chain: str, contract: str, token_id: str) -> Tuple[bool, Optional[int]]:
+        """(looked up, rarity rank or None). Default: not looked up."""
+        return False, None
 
     @abstractmethod
     def get_active_listings_count(
@@ -51,7 +59,7 @@ class CollectionDataProvider(ABC):
         pass
 
     @abstractmethod
-    def get_top_offer(self, slug: str) -> Optional[Offer]:
+    def get_top_offer(self, slug: str, currency_filter=None) -> Optional[Offer]:
         """Fetches the highest active offer/bid for a collection."""
         pass
 
@@ -61,6 +69,7 @@ class CollectionDataProvider(ABC):
         cursor: Optional[str] = None,
         limit: int = 50,
         chain: Optional[str] = None,
+        order_by: Optional[str] = None,
     ) -> Tuple[List[str], Optional[str]]:
         """
         Discovers collection slugs via general collections endpoint.

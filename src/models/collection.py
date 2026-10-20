@@ -74,6 +74,8 @@ class SaleEvent:
     buyer: Optional[str] = None
     price_value: Optional[float] = None
     price_currency: Optional[str] = "ETH"
+    protocol_address: Optional[str] = None  # with order_hash, finds the order (listing bought or offer accepted)
+    token_standard: Optional[str] = None    # "erc721" / "erc1155"
 
 @dataclass
 class Listing:
@@ -84,6 +86,7 @@ class Listing:
     status: str = "ACTIVE"
     remaining_quantity: int = 1
     order_created_at: Optional[int] = None
+    token_key: Optional[str] = None  # "<contract>:<token_id>" when available, to count unique listed NFTs
 
 @dataclass
 class Offer:

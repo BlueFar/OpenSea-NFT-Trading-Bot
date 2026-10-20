@@ -33,39 +33,11 @@ class DiscoveryEngine:
         """
         discovered_slugs: Set[str] = set()
 
-        # 1. Primary: /api/v2/collections with checkpointed cursor
-        cursor = self.state_store.get_checkpoint("collections")
-        logger.info("Starting progressive discovery crawl from cursor: %s", cursor or "START")
+        # 1. Primary: /api/v2/collections, one checkpointed cursor per chain (or one overall if no chains set)
+        for chain in (self.config.chains or [None]):
+            discovered_slugs.update(self._crawl_primary(chain))
 
-        pages_crawled = 0
-        current_cursor = cursor
-
-        while pages_crawled < self.config.max_pages_per_cycle:
-            slugs, next_cursor = self.provider.discover_collections(
-                cursor=current_cursor,
-                limit=self.config.batch_size,
-            )
-            if not slugs:
-                logger.info("No more collections returned from primary endpoint. Resetting cursor.")
-                current_cursor = None
-                break
-
-            for s in slugs:
-                discovered_slugs.add(s)
-
-            pages_crawled += 1
-            current_cursor = next_cursor
-
-            # Save checkpoint after each successful page
-            self.state_store.save_checkpoint("collections", current_cursor)
-
-            if not next_cursor:
-                logger.info("Reached end of collections catalog. Resetting cursor checkpoint.")
-                current_cursor = None
-                self.state_store.save_checkpoint("collections", None)
-                break
-
-        logger.info("Crawled %d primary pages, discovered %d collections.", pages_crawled, len(discovered_slugs))
+        logger.info("Primary crawl discovered %d collections.", len(discovered_slugs))
 
         # 2. Supplementary Feeds (Top, Trending, Watchlist)
         now = time.time()
@@ -97,3 +69,54 @@ class DiscoveryEngine:
                 discovered_slugs.add(s)
 
         return list(discovered_slugs)
+
+    def _crawl_primary(self, chain: Optional[str]) -> List[str]:
+        """
+        Crawls up to max_pages_per_cycle pages of /api/v2/collections for one chain.
+        With order_by set (e.g. seven_day_volume), the crawl restarts from the top after
+        max_depth_pages so the most active collections keep being rediscovered.
+        """
+        key = f"collections:{chain}" if chain else "collections"
+        depth_key = f"{key}#depth"
+        current_cursor = self.state_store.get_checkpoint(key)
+        try:
+            depth = int(self.state_store.get_checkpoint(depth_key) or 0)
+        except ValueError:
+            depth = 0
+        if not current_cursor:
+            depth = 0
+        logger.info("Discovery crawl [%s] from cursor: %s (depth %d)", chain or "all chains", current_cursor or "START", depth)
+
+        found: List[str] = []
+        pages_crawled = 0
+        while pages_crawled < self.config.max_pages_per_cycle:
+            kwargs = {"cursor": current_cursor, "limit": self.config.batch_size}
+            if chain:
+                kwargs["chain"] = chain
+            if self.config.order_by:
+                kwargs["order_by"] = self.config.order_by
+            slugs, next_cursor = self.provider.discover_collections(**kwargs)
+            if not slugs:
+                logger.info("No more collections returned for %s. Resetting cursor.", chain or "all chains")
+                current_cursor = None
+                depth = 0
+                self.state_store.save_checkpoint(key, None)
+                break
+
+            found.extend(slugs)
+            pages_crawled += 1
+            depth += 1
+            current_cursor = next_cursor
+
+            if not next_cursor or (self.config.max_depth_pages and depth >= self.config.max_depth_pages):
+                logger.info("Reached end of crawl window for %s. Restarting from the top next cycle.", chain or "all chains")
+                current_cursor = None
+                depth = 0
+                self.state_store.save_checkpoint(key, None)
+                break
+
+            # Save checkpoint after each successful page
+            self.state_store.save_checkpoint(key, current_cursor)
+
+        self.state_store.save_checkpoint(depth_key, str(depth))
+        return found

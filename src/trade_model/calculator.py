@@ -1,4 +1,4 @@
-from typing import Optional, List, Tuple
+from typing import Optional, List, Set, Tuple
 from ..models.collection import CollectionMetadata, Fee
 from ..models.trade import (
     ObservedMarketData,
@@ -10,6 +10,10 @@ from ..models.trade import (
 KNOWN_OPENSEA_FEE_RECIPIENTS = {
     "0x0000a26b00c1f0df003000390027140000faa719",  # Seaport 1.5/1.6 OpenSea Fee Collector
     "0x5b3256965e7c3cf26e11fcaf296dfc8807c01073",  # OpenSea Legacy Fee Wallet
+    # Chain-specific OpenSea fee recipients (OpenSea SDK 12.11.2, src/constants.ts)
+    "0x07d3a100c3880830dd43fe5c938b5144721ce9d6",  # Alternate fee recipient (MegaETH)
+    "0xdfe1593dca6ad8a20eeb418643e48577c1626f7c",  # Somnia
+    "0xd9f68d28e451a83affdb7c71cc2c20552555b07f",  # Gunzilla (GUNZ)
 }
 
 def extract_fees_from_collection(collection: CollectionMetadata) -> Tuple[Optional[float], Optional[float], bool]:
@@ -56,19 +60,30 @@ def compute_trade_economics(
     entry_offer_premium_pct: float = 1.0,
     target_sale_discount_from_floor_pct: float = 5.0,
     gas_estimate_eth: float = 0.005,
+    fallback_marketplace_fee_pct: Optional[float] = None,
+    currency_groups: Optional[List[Set[str]]] = None,
 ) -> TradeEconomics:
     """
     Calculates theoretical trade economics according to user specifications:
     - Distinguishes observed market data, model assumptions, and modelled results.
-    - Does NOT use a hardcoded marketplace fee fallback; if fee cannot be determined, marks incomplete.
-    - Handles currency parity (ETH == WETH).
+    - Marketplace fee comes from collection metadata; if absent, the explicitly configured
+      fallback_marketplace_fee_pct is used and labelled CONFIG. With no fallback, marks incomplete.
+    - Handles currency parity (ETH == WETH, and per chain e.g. APE == WAPE via currency_groups).
     """
     # Extract fees from collection if available
     mp_fee_pct = None
     creator_fee_pct = None
     fees_reliable = False
+    mp_fee_source = "UNKNOWN"
     if collection is not None:
         mp_fee_pct, creator_fee_pct, fees_reliable = extract_fees_from_collection(collection)
+        if fees_reliable:
+            mp_fee_source = "API"
+    if not fees_reliable and fallback_marketplace_fee_pct is not None:
+        mp_fee_pct = fallback_marketplace_fee_pct
+        creator_fee_pct = creator_fee_pct or 0.0  # Empty fee schedule = no creator royalty configured
+        fees_reliable = True
+        mp_fee_source = "CONFIG"
 
     observed = ObservedMarketData(
         observed_top_offer=observed_top_offer,
@@ -78,6 +93,7 @@ def compute_trade_economics(
         marketplace_fee_pct=mp_fee_pct,
         creator_royalty_pct=creator_fee_pct,
         fees_reliable=fees_reliable,
+        marketplace_fee_source=mp_fee_source,
     )
 
     assumptions = TradeAssumptions(
@@ -98,11 +114,10 @@ def compute_trade_economics(
             currency=floor_currency,
         )
 
-    # Check currency compatibility (ETH and WETH are 1:1 interchangeable on EVM)
-    is_compatible_currency = (
-        (floor_currency.upper() in ("ETH", "WETH") and top_offer_currency.upper() in ("ETH", "WETH"))
-        or (floor_currency.upper() == top_offer_currency.upper())
-    )
+    # Check currency compatibility: a coin and its wrapped form are 1:1 interchangeable
+    groups = currency_groups or [{"ETH", "WETH"}]
+    fc, oc = (floor_currency or "").upper(), (top_offer_currency or "").upper()
+    is_compatible_currency = fc == oc or any(fc in g and oc in g for g in groups)
     if not is_compatible_currency:
         return TradeEconomics(
             observed=observed,
@@ -127,6 +142,13 @@ def compute_trade_economics(
     entry_offer_to_floor_ratio = (modelled_entry_offer / current_floor) * 100.0
     floor_spread_to_entry_offer = ((current_floor - modelled_entry_offer) / modelled_entry_offer) * 100.0 if modelled_entry_offer > 0 else 0.0
 
+    # "Floor above 40% of top offer, including royalty": the entry cost includes the creator
+    # royalty owed when the NFT is resold at the target exit price.
+    effective_entry_cost = modelled_entry_offer + target_exit_price * ((creator_fee_pct or 0.0) / 100.0)
+    floor_premium_over_effective_offer = (
+        ((current_floor - effective_entry_cost) / effective_entry_cost) * 100.0 if effective_entry_cost > 0 else None
+    )
+
     # 5. Check if fees are reliable
     if not fees_reliable or mp_fee_pct is None:
         return TradeEconomics(
@@ -138,6 +160,8 @@ def compute_trade_economics(
                 gross_spread=gross_spread,
                 entry_offer_to_floor_ratio_pct=entry_offer_to_floor_ratio,
                 floor_spread_to_entry_offer_pct=floor_spread_to_entry_offer,
+                effective_entry_cost=effective_entry_cost,
+                floor_premium_over_effective_offer_pct=floor_premium_over_effective_offer,
                 is_complete_and_reliable=False,
                 status_note="INCOMPLETE: Applicable OpenSea marketplace fee schedule could not be determined reliably from collection metadata."
             ),
@@ -169,6 +193,8 @@ def compute_trade_economics(
             estimated_profit_margin_pct=est_margin,
             entry_offer_to_floor_ratio_pct=entry_offer_to_floor_ratio,
             floor_spread_to_entry_offer_pct=floor_spread_to_entry_offer,
+            effective_entry_cost=effective_entry_cost,
+            floor_premium_over_effective_offer_pct=floor_premium_over_effective_offer,
             is_complete_and_reliable=True,
             status_note="COMPLETE: Calculated using observed market values and stated model assumptions."
         ),
