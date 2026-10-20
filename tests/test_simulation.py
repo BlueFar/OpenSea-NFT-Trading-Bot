@@ -998,6 +998,9 @@ def test_track_record_verdicts():
     fresh = {**base, "status": "holding", "entry_price": 0.2, "entry_at": now - 3600}
     r = track_record(fresh, [sale(0.01, 20.0, 1), sale(0.01, 20.0, 1)], 5.0, now)
     assert r["verdict"] == "not_yet" and "puts it down overall" in r["why"]
+    # Items that never sold within the holding limit keep it from being proven, even at a small profit
+    r = track_record(base, [sale(0.01, 10.0, 0.5), sale(0.01, 10.0, 0.5), sale(0.001, 0.5, 14, how="expired")], 5.0, now)
+    assert r["verdict"] == "not_yet" and r["why"].startswith("1 of 3 items bought didn't sell")
 
     # Holding an item now worth less than it cost: not judged for a few days, then losing
     held = {**base, "status": "holding", "entry_price": 0.1, "entry_at": now - 86400, "ask": 0.11}

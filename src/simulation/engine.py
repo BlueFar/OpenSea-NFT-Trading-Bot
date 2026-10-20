@@ -517,6 +517,8 @@ class PaperTrader:
     def _note_problem(self, book: Book, pos: Dict[str, Any], message: str, now: int) -> None:
         # The attempt counts as this check, so a failing collection is retried at its normal pace
         p = dict(pos, note=message, last_tick_at=now)
+        if pos["status"] == "bidding" and pos.get("last_tick_at"):  # the offer was up all the same
+            p["bid_seconds"] = (pos.get("bid_seconds") or 0) + min(now - pos["last_tick_at"], MAX_CHECK_GAP_SECONDS)
         new = pos.get("note") != message
         book.store.save_round(p, pos["rev"] or 0, events=[(now, pos["slug"], "problem", message)] if new else ())
 

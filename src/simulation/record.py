@@ -2,7 +2,8 @@
 A collection's track record in the simulation: does our offer get taken, how fast does the bought item sell, and
 does it make money. Each collection gets a verdict the real bot can later trade on:
 
-- proven:   at least MIN_SALES_PROVEN sales, none at a loss, and in profit overall (held items at today's floor)
+- proven:   at least MIN_SALES_PROVEN sales, none at a loss, none left unsold past the holding limit, and in
+            profit overall (held items at today's floor)
 - losing:   down overall, counting held items at today's floor, after a losing trade or an item held under
             water for UNDERWATER_DAYS (a fresh item a little under is not judged yet)
 - slow:     no fill after SLOW_DAYS of bidding
@@ -41,6 +42,7 @@ def track_record(pos: Dict[str, Any], trades: List[Dict[str, Any]], exit_discoun
     open_net = d.get("now_net") if holding else None
     total = realised + (open_net or 0.0) if fills else None
     losses = [t for t in trades if (t.get("net") or 0.0) < 0]
+    expired = [t for t in trades if t.get("how") == "expired"]  # bought but never sold within the holding limit
     roi = [t["roi_pct"] for t in sold if t.get("roi_pct") is not None]
     held_days = (now - pos["entry_at"]) / DAY if holding and pos.get("entry_at") else None
 
@@ -49,7 +51,7 @@ def track_record(pos: Dict[str, Any], trades: List[Dict[str, Any]], exit_discoun
         verdict = "losing"
         why = (f"{len(losses)} of {len(trades)} trades lost money" if losses else
                f"the item held for {held_days:.0f} days is down {fmt_price(abs(open_net or 0), cur)} at today's floor")
-    elif len(sold) >= MIN_SALES_PROVEN and not losses and (total or 0) > 0:
+    elif len(sold) >= MIN_SALES_PROVEN and not losses and not expired and (total or 0) > 0:
         verdict = "proven"
         why = (f"{len(sold)} sales, all profitable, {_mean(roi):+.0f}% a trade on average" if roi else
                f"{len(sold)} profitable sales")
@@ -59,11 +61,14 @@ def track_record(pos: Dict[str, Any], trades: List[Dict[str, Any]], exit_discoun
         verdict = "not_yet"
         if not fills:
             why = f"no fill yet ({bid_days:.1f} days of bidding)"
+        elif expired:
+            why = (f"{len(expired)} of {fills} item{'s' if fills != 1 else ''} bought didn't sell within the holding "
+                   f"limit")
         elif losses:
             why = (f"{len(losses)} of {len(trades)} trades lost money, "
                    f"{'up' if (total or 0) >= 0 else 'down'} {fmt_price(abs(total or 0), cur)} overall")
         elif not sold:
-            if holding:
+            if holding and not trades:
                 why = f"holding its first item ({held_days:.1f} days)" if held_days is not None else "first item bought"
             else:
                 why = f"{len(trades)} item{'s' if len(trades) != 1 else ''} bought, none sold yet"
