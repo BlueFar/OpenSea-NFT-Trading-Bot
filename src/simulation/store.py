@@ -13,14 +13,14 @@ POSITION_COLUMNS = (
     "round_started_at", "last_tick_at", "last_sale_check", "note", "created_at", "updated_at",
     "source", "auto_stopped", "leaving", "trial_round", "trial_state", "trial_started_at",
     "last_outbid_at", "missed_fills", "missed_above_limit", "limit_pct", "capped_since",
-    "bid_seconds", "entry_metrics",
+    "bid_seconds", "entry_metrics", "dropped_at",
 )
 # Added after the first release: (column, type) brought into older databases
 LATER_COLUMNS = (("leaving", "INTEGER DEFAULT 0"), ("trial_round", "INTEGER"), ("trial_state", "TEXT"),
                  ("trial_started_at", "INTEGER"), ("last_outbid_at", "INTEGER"),
                  ("missed_fills", "INTEGER DEFAULT 0"), ("missed_above_limit", "INTEGER DEFAULT 0"),
                  ("limit_pct", "REAL"), ("capped_since", "INTEGER"),
-                 ("bid_seconds", "REAL DEFAULT 0"), ("entry_metrics", "TEXT"))
+                 ("bid_seconds", "REAL DEFAULT 0"), ("entry_metrics", "TEXT"), ("dropped_at", "INTEGER"))
 # Longest gap between two checks counted as time spent bidding (the bot may have been off)
 MAX_CHECK_GAP_SECONDS = 3600
 # Strategy A (the rules shown on the dashboard) keeps the original sim_ tables; strategy B, a second set of
@@ -183,6 +183,15 @@ class SimStore:
         except sqlite3.OperationalError:  # the bot hasn't created its tables yet
             return []
 
+    def failing_rules(self) -> Dict[str, Optional[str]]:
+        """{slug: the rule its latest bot check failed} for collections not on the Candidates page."""
+        try:
+            with self._conn() as conn:
+                return {r[0]: r[1] for r in conn.execute(
+                    "SELECT slug, last_result_rule FROM monitored_collections WHERE last_result_pass=0")}
+        except sqlite3.OperationalError:
+            return {}
+
     def failing_candidates(self) -> List[str]:
         """Collections whose latest bot check failed a rule (so they're not on the Candidates page)."""
         try:
@@ -276,6 +285,8 @@ class SimStore:
                 # A fresh offer: sales from while it was stopped don't count
                 fields.update({"bid": None, "bid_state": None, "round_started_at": None, "last_sale_check": None,
                                "capped_since": None})
+            if action == "start":
+                fields["dropped_at"] = None
             if action == "start" and status == "holding":
                 fields.update({"listed_at": None, "ask": None, "last_sale_check": None})
             if action == "remove" and closing_trade:
@@ -349,9 +360,9 @@ class SimStore:
         return out
 
     def get_round_sales(self, slug: str, from_round: int) -> List[Dict[str, Any]]:
-        """Completed sales (not removals) of a collection from a round on, oldest first."""
+        """Completed rounds (sold, or held too long and counted at the floor; not removals) from a round on."""
         with self._conn() as conn:
-            rows = conn.execute(f"SELECT round, net, currency FROM {self.T_TRADES} WHERE slug=? AND round>=? AND how='sold' "
+            rows = conn.execute(f"SELECT round, net, currency FROM {self.T_TRADES} WHERE slug=? AND round>=? AND how IN ('sold', 'expired') "
                                 "ORDER BY id", (slug, from_round)).fetchall()
         return [dict(zip(("round", "net", "currency"), r)) for r in rows]
 

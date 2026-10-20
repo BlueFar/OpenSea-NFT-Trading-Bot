@@ -523,9 +523,14 @@ def test_candidates_join_and_leave_the_simulation_with_the_bots_checks(tmp_path)
     t.seed()
     assert {p["slug"]: p["source"] for p in t.store.get_positions()} == {"alpha": "candidate", "beta": "candidate"}
 
-    # Stops passing: out of the simulation at once
+    # Stops passing: its offer stays up for the grace period, then it leaves
     _passing(state, "beta", passes=False)
-    t.seed()
+    now = int(time.time())
+    t.seed(now=now)
+    assert t.store.get_position("beta")["status"] == "bidding" and t.store.get_position("beta")["dropped_at"] == now
+    t.seed(now=now + 23 * 3600)
+    assert t.store.get_position("beta")["status"] == "bidding"
+    t.seed(now=now + 24 * 3600)
     assert t.store.get_position("beta")["status"] == "removed"
     assert t.store.get_position("alpha")["status"] == "bidding"
 
@@ -1066,3 +1071,62 @@ def test_dashboard_shows_the_track_record(tmp_path):
         assert p["record"]["verdict"] == "not_yet" and p["b"]["record"]["verdict"] == "not_yet"
         [item] = _call("GET", "/api/final", env)[1]["items"]
         assert item["record"]["verdict"] == "not_yet" and item["b"]["record"]["fills"] == 0
+
+
+def _failing(state, slug, rule):
+    with sqlite3.connect(state.db_path) as conn:
+        conn.execute("INSERT OR IGNORE INTO monitored_collections (slug, discovery_source) VALUES (?, 'test')", (slug,))
+        conn.execute("UPDATE monitored_collections SET last_result_pass=0, last_result_rule=? WHERE slug=?", (rule, slug))
+
+
+def test_a_candidate_back_within_the_grace_period_keeps_its_offer(tmp_path):
+    m = FakeMarket()
+    t, state = _trader(tmp_path, m, collections=[], include_candidates=True)
+    _passing(state, "kongz")
+    t0 = int(time.time()) - 20000
+    t.tick(now=t0)
+    _failing(state, "kongz", "trading_frequency")
+    t.seed(now=t0 + 600)
+    assert t.store.get_last_events()["kongz"]["kind"] == "grace"
+    assert "trading pace" in t.store.get_last_events()["kongz"]["message"]
+    t.tick(now=t0 + 900)                           # still bidding while it's away
+    assert t.store.get_position("kongz")["bid"] == 0.05966
+    _passing(state, "kongz")
+    t.seed(now=t0 + 5 * 3600)
+    p = t.store.get_position("kongz")
+    assert p["status"] == "bidding" and p["dropped_at"] is None and p["bid"] == 0.05966 and p["round"] == 1
+    # A serious failure removes it at once
+    _failing(state, "kongz", "verification")
+    t.seed(now=t0 + 6 * 3600)
+    p = t.store.get_position("kongz")
+    assert p["status"] == "removed" and "verified" in t.store.get_last_events()["kongz"]["message"]
+    # No grace period configured: removed at once
+    _passing(state, "kongz")
+    t.seed(now=t0 + 7 * 3600)
+    assert t.store.get_position("kongz")["status"] == "bidding"
+    t.sim.candidate_grace_hours = 0
+    _failing(state, "kongz", "trading_frequency")
+    t.seed(now=t0 + 8 * 3600)
+    assert t.store.get_position("kongz")["status"] == "removed"
+
+
+def test_an_item_held_too_long_counts_as_sold_at_todays_floor(tmp_path):
+    m, t, state, t0 = _holding(tmp_path, max_hold_days=14)
+    m.floor = 0.05                                 # under what we paid: it never sells
+    t.tick(now=t0 + 13 * 86400)
+    assert t.store.get_position("kongz")["status"] == "holding"
+    t.tick(now=t0 + 100 + 14 * 86400)
+    p = t.store.get_position("kongz")
+    assert p["status"] == "bidding" and p["round"] == 2 and p["entry_price"] is None
+    [trade] = t.store.get_trades()
+    assert trade["how"] == "expired" and trade["exit_price"] == pytest.approx(0.0475) and trade["net"] < 0
+    assert t.store.get_last_events()["kongz"]["kind"] == "expired"
+    from src.simulation.record import track_record
+    pos = t.store.get_position("kongz")
+    pos["bid_seconds"] = 86400
+    assert track_record(pos, t.store.get_trades(), 5.0, t0 + 15 * 86400)["verdict"] == "losing"
+    # 0 = no limit
+    m2, t2, _, t1 = _holding(tmp_path / "b", max_hold_days=0)
+    m2.floor = 0.05
+    t2.tick(now=t1 + 100 + 30 * 86400)
+    assert t2.store.get_position("kongz")["status"] == "holding"

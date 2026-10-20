@@ -230,6 +230,13 @@ BOT_METRIC_KEYS = {"spread", "listed_pct", "listed", "sales_7d", "sales_daily", 
                    "floor_7d", "owners", "supply", "pace", "roi", "net", "floor", "offer", "royalty_pct", "fee_pct",
                    "bid_premium_pct", "trading_frequency", "verified", "created_date", "chain"}
 
+# A candidate failing one of these leaves the simulation at once instead of after the grace period
+SERIOUS_RULES = {"verification", "listed_items", "floor_change_1d"}
+RULE_NAMES = {"verification": "lost its verified status", "listed_items": "too many items listed",
+              "floor_change_1d": "a big 1-day floor drop", "floor_change_7d": "the 7-day floor move",
+              "trading_frequency": "trading pace", "offer_to_floor": "the offer-to-floor spread",
+              "net_profit": "the profit after costs", "project_age": "project age", "total_supply": "total supply"}
+
 TRIAL_DAYS = 7  # longest a Final list pick that stopped passing gets to finish its trial round
 
 
@@ -342,7 +349,9 @@ class PaperTrader:
         OpenSea calls), so the bot runs it after every collection check, not just every simulation round.
         - Settings file and Final list collections start once; removing one on the dashboard sticks.
         - include_candidates: every collection that passes the bot's rules is simulated. One that stops passing
-          is removed at once, or after its bought item sells; it comes back if it passes again.
+          keeps its offer for candidate_grace_hours in case it passes again (most do within a day), unless it failed
+          a serious rule (SERIOUS_RULES); then it is removed, or leaves after its bought item sells. It comes back
+          if it passes again.
         - A Final list pick that stops passing gets a trial: one more simulated round (TRIAL_DAYS at most, longer
           while a bought item is worth a profit at today's floor). A profit keeps it on the Final list; otherwise
           it is removed from both.
@@ -352,12 +361,16 @@ class PaperTrader:
             self.store.seed_final(self.sim.final_list)
         final = {f["slug"] for f in self.store.get_final_list()}
         passing = set(self.store.passing_candidates())
-        failing = set(self.store.failing_candidates())
+        rules = self.store.failing_rules()
+        failing = set(rules)
         for book in self.books():
-            self._seed_book(book, final, passing)
+            self._seed_book(book, final, passing, rules, now)
         self._final_trials(final, passing, failing, now)
 
-    def _seed_book(self, book: Book, final, passing) -> None:
+    def _seed_book(self, book: Book, final, passing, rules: Optional[Dict[str, Optional[str]]] = None,
+                   now: Optional[int] = None) -> None:
+        rules = rules or {}
+        now = int(now if now is not None else time.time())
         store = book.store
         keep = set(final)
         for slug, source, note in (
@@ -386,8 +399,11 @@ class PaperTrader:
             elif pos.get("auto_stopped") and pos["status"] in ("stopped", "removed"):
                 store.set_status(slug, "start", note="Back on the Candidates list: bidding again.")
             elif pos.get("leaving"):
-                store.set_fields(slug, leaving=0, event=("start", "Back on the Candidates list: it bids again "
-                                                                  "after this sale."))
+                store.set_fields(slug, leaving=0, dropped_at=None, event=(
+                    "start", "Back on the Candidates list: it bids again after this sale."))
+            elif pos.get("dropped_at"):
+                store.set_fields(slug, dropped_at=None, event=(
+                    "start", "Back on the Candidates list within the grace period: the offer carries on."))
         for pos in store.get_positions():
             slug = pos["slug"]
             if pos.get("source") != "candidate" or slug in passing or slug in keep:
@@ -400,7 +416,19 @@ class PaperTrader:
             elif pos["status"] == "stopped" and not pos.get("auto_stopped"):
                 store.set_status(slug, "remove", note="Off the Candidates list: removed from the simulation.")
             else:
-                store.auto_remove(slug, "Off the Candidates list: removed from the simulation.")
+                rule = rules.get(slug)
+                grace = self.sim.candidate_grace_hours * 3600
+                if grace <= 0 or rule in SERIOUS_RULES:
+                    why = f" (failed {RULE_NAMES.get(rule, rule)})" if rule in SERIOUS_RULES else ""
+                    store.auto_remove(slug, f"Off the Candidates list{why}: removed from the simulation.")
+                elif not pos.get("dropped_at"):
+                    store.set_fields(slug, dropped_at=now, event=(
+                        "grace", f"Off the Candidates list ({RULE_NAMES.get(rule, rule or 'no longer passing')}). "
+                                 f"The offer stays up for {self.sim.candidate_grace_hours:g} hours in case it passes "
+                                 f"again."))
+                elif now - pos["dropped_at"] >= grace:
+                    store.auto_remove(slug, f"Still off the Candidates list after {self.sim.candidate_grace_hours:g} "
+                                            f"hours: removed from the simulation.")
 
     def _final_trials(self, final, passing, failing, now: int) -> None:
         discount = self.config.trade_model.target_sale_discount_from_floor_pct
@@ -618,6 +646,19 @@ class PaperTrader:
                                 f"{fmt_price(prev, cur)} to {fmt_price(ask, cur)}.")
             p["ask"] = ask
             ticks.append((slug, now, p["round"], "holding", None, None, floor, ask))
+            limit_days = sim.max_hold_days
+            if limit_days and floor and p.get("entry_at") and now - p["entry_at"] >= limit_days * 86400:
+                # Held too long: counted as sold just under today's floor, loss or not, so money isn't stuck
+                t = closing_trade(p, tm.target_sale_discount_from_floor_pct, now)
+                if t:
+                    t["how"] = "expired"
+                    trades.append(t)
+                    say("expired", f"Held {fmt_duration(now - p['entry_at'])} without selling, so it counts as sold "
+                                   f"at {fmt_price(t['exit_price'], cur)}, {tm.target_sale_discount_from_floor_pct:g}% "
+                                   f"under today's floor: {'profit' if t['net'] >= 0 else 'loss'} "
+                                   f"{fmt_price(abs(t['net']), cur)} ({t['roi_pct']:+.0f}%).")
+                    p["capped_since"] = None
+                    self._next_round(p, say)
         p["last_tick_at"] = now
 
         if not book.store.save_round(p, rev, events, ticks, trades, seen):
@@ -746,6 +787,10 @@ class PaperTrader:
                 say("stepup", f"Sold, so the next offer works to a {up:g}% limit (up from {p['limit_pct']:g}%).")
             p["limit_pct"] = up
         p["capped_since"] = None
+        self._next_round(p, say)
+
+    def _next_round(self, p: Dict[str, Any], say) -> None:
+        """After the item is gone (sold, or held too long): leave, bid again, or stop."""
         if p.get("leaving"):
             say("remove", "Off the Candidates list, so it leaves the simulation now the item has sold.")
             p.update({"status": "removed", "auto_stopped": 1, "leaving": 0, "entry_price": None, "entry_at": None,

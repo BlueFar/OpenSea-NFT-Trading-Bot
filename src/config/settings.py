@@ -156,6 +156,9 @@ class SimulationConfig(BaseModel):
     outbid_step_pct: float = Field(0.1, gt=0)            # Beat the best offer by this much (then rounded up)
     repeat: bool = True                                  # After selling, place a new offer
     strategy_b: StrategyBConfig = Field(default_factory=StrategyBConfig)
+    candidate_grace_hours: float = Field(24.0, ge=0)     # A candidate that stops passing keeps its offer this long
+    max_hold_days: float = Field(14.0, ge=0)             # A bought item unsold after this long counts as sold at
+                                                         # today's floor, loss or not (0 = wait for a real sale)
 
 class BotConfig(BaseModel):
     general: GeneralConfig = Field(default_factory=GeneralConfig)
