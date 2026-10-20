@@ -260,7 +260,11 @@ def parse_listings(data: Dict[str, Any]) -> Tuple[List[Listing], Optional[str]]:
 
         # Identify the listed token so several listings of one NFT count once
         token_key = None
-        offer_items = ((item.get("protocol_data") or {}).get("parameters") or {}).get("offer") or []
+        params = (item.get("protocol_data") or {}).get("parameters") or {}
+        maker = params.get("offerer") or item.get("maker")
+        if isinstance(maker, dict):
+            maker = maker.get("address")
+        offer_items = params.get("offer") or []
         nft_items = [o for o in offer_items if isinstance(o, dict) and o.get("itemType") in NFT_ITEM_TYPES]
         if nft_items:
             token_key = f"{str(nft_items[0].get('token', '')).lower()}:{nft_items[0].get('identifierOrCriteria')}"
@@ -274,6 +278,7 @@ def parse_listings(data: Dict[str, Any]) -> Tuple[List[Listing], Optional[str]]:
             remaining_quantity=remaining_qty,
             order_created_at=item.get("order_created_at"),
             token_key=token_key,
+            maker=str(maker).lower() if maker else None,
         ))
 
     return listings, next_cursor

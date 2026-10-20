@@ -790,7 +790,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             "quiet_interval_seconds": max(sim.interval_seconds, sim.quiet_interval_seconds),
             "strategy_b": sim.strategy_b.model_dump(),
             "candidate_grace_hours": sim.candidate_grace_hours,
-            "max_hold_days": sim.max_hold_days,
+            "exit": sim.exit.model_dump(exclude={"own_wallets"}),
             "min_profit_gap_pct": sim.min_profit_gap_pct,
             "outbid_step_pct": sim.outbid_step_pct,
             "repeat": sim.repeat,

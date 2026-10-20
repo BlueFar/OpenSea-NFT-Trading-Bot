@@ -130,8 +130,18 @@ simulation:
   candidate_grace_hours: 24         # ...but keeps its offer this long first, in case it passes again (most
                                     # come back within a day). Losing the blue tick, a listings jump or a big
                                     # 1-day floor drop removes it at once.
-  max_hold_days: 14                 # A bought item still unsold after this long counts as sold just under
-                                    # today's floor, loss or not, so money isn't stuck (0 = no limit)
+  exit:                             # Selling a bought item that doesn't sell at the normal price (automatic)
+    lower_after_days: 3             # In profit but unsold this long: list it a bit lower every day...
+    lower_step_pct: 3               # ...this much further under the floor each day, never below break-even
+    stop_loss_hours: 24             # Market floor under break-even this long: the stop-loss starts
+    recover_hours: 2                # Market floor back above break-even this long: back to normal selling
+    stop_loss_start_pct: 5          # Stop-loss listing: this far under the market floor, then lower_step_pct
+    stop_loss_lowest_pct: 20        # lower each day (or when a cheaper listing sells first), never past this
+    accept_offer_pct: 90            # Under break-even, take the best offer once it is this % of our listing
+    cool_off_days: 7                # After a stop-loss, no new offer on that collection for this long
+    market_floor_rank: 3            # Market floor = 3rd-cheapest listing, one per seller, so one panic
+                                    # listing can't set the price
+    own_wallets: []                 # Live bot: our wallet(s), so our own listing never counts as the floor
   min_profit_gap_pct: 40.0          # Stop outbidding below this spread; hold at the limit instead
   outbid_step_pct: 0.1              # Beat the best offer by this much, rounded up to 4 significant digits
   repeat: true                      # After a sale, place a new offer and go again

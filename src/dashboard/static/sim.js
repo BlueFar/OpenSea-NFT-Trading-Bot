@@ -10,7 +10,8 @@
                        limit: "c-muted", paused: "c-warn", filled: "c-good", listed: "c-accent", repriced: "c-muted",
                        sold: "c-good", ignored: "c-muted", problem: "c-bad", added: "c-muted", stop: "c-muted",
                        start: "c-muted", remove: "c-muted", trial: "c-warn", kept: "c-good", missed: "c-warn",
-                       stepdown: "c-warn", stepup: "c-good", grace: "c-warn", expired: "c-bad" };
+                       stepdown: "c-warn", stepup: "c-good", grace: "c-warn", under: "c-warn",
+                       stoploss: "c-bad", undercut: "c-warn", recovered: "c-good", cooloff: "c-muted" };
   var data = null, busy = false;
 
   // Offers sit 0.1% apart, so prices here show at least 4 significant digits (with the dollar value on hover)
@@ -19,6 +20,8 @@
     var d = n === 0 ? 2 : Math.min(8, Math.max(2, 3 - Math.floor(Math.log10(Math.abs(n)))));
     return '<span class="usd" tabindex="0" data-amt="' + n + '" data-cur="' + esc(cur || "") + '">' + esc(fmt(n, d) + " " + (cur || "")) + "</span>";
   }
+  function ordinal(n) { return n === 1 ? "" : n === 2 ? "2nd " : n === 3 ? "3rd " : n + "th "; }
+  function isSale(t) { return t.how === "sold" || t.how === "stoploss" || t.how === "stoploss_offer"; }
   function pct(n, d) { return isNum(n) ? fmt(n, d == null ? 0 : d) + "%" : "–"; }
   function hours(sec) {
     if (!isNum(sec) || sec <= 0) return "–";
@@ -123,6 +126,7 @@
 
   function statusPill(p) {
     if (p.status === "stopped") return '<span class="pill neutral">Stopped</span>';
+    if (p.status === "holding" && p.stop_loss_at) return '<span class="pill bad">Stop-loss · listed</span>';
     if (p.status === "holding") return p.ask ? '<span class="pill good">Bought · listed</span>' : '<span class="pill good">Bought</span>';
     if (!isNum(p.bid) && p.bid_state !== "paused") return '<span class="pill neutral">Starting</span>';
     switch (p.bid_state) {
@@ -183,6 +187,10 @@
     else if (p.source === "candidate") meta.push("Candidate");
     if (p.leaving) meta.push("off the Candidates list: leaves once the item sells");
     else if (p.dropped_at && p.status === "bidding") meta.push("off the Candidates list: offer kept until " + N.fmtTime(p.dropped_at + (data.candidate_grace_hours || 0) * 3600) + " in case it passes again");
+    var ex = data.exit || {};
+    if (p.status === "holding" && p.stop_loss_at) meta.push("stop-loss since " + N.fmtTime(p.stop_loss_at) + (isNum(p.market_floor) ? ", market floor " + fmt(p.market_floor, 4) + " " + cur : ""));
+    else if (p.status === "holding" && p.under_since) meta.push("under break-even since " + N.fmtTime(p.under_since) + ": stop-loss at " + N.fmtTime(p.under_since + (ex.stop_loss_hours || 0) * 3600) + " if it stays there");
+    else if (p.status === "bidding" && p.cool_off_until && p.cool_off_until * 1000 > Date.now()) meta.push("cool-off after a stop-loss: bidding again " + N.fmtTime(p.cool_off_until));
     var trial = trialText(p);
     if (trial) meta.push(trial);
     if ((p.round || 1) > 1) meta.push("round " + p.round);
@@ -229,7 +237,7 @@
       bidding: bidding.length, holding: holding.length,
       onTop: bidding.filter(function (p) { return p.bid_state === "top" || p.bid_state === "alone"; }).length,
       filled: trades.length + holding.length,
-      sold: trades.filter(function (t) { return t.how === "sold"; }).length,
+      sold: trades.filter(isSale).length,
       missed: rows.reduce(function (n, p) { return n + (p.missed_fills || 0) + (p.missed_above_limit || 0); }, 0),
       total: totalText(trades.concat(held))
     };
@@ -271,10 +279,10 @@
     var bidding = pos.filter(function (p) { return p.status === "bidding"; });
     var onTop = bidding.filter(function (p) { return p.bid_state === "top" || p.bid_state === "alone"; }).length;
     var holding = pos.filter(function (p) { return p.status === "holding" || (p.status === "stopped" && p.entry_price != null); });
-    var sold = trades.filter(function (t) { return t.how === "sold"; });
+    var sold = trades.filter(isSale);
     var under = holding.filter(function (p) { return isNum(p.now_net) && p.now_net < 0; }).length;
-    // Results count bought items that haven't sold as if sold under today's floor: listings never go below
-    // break-even, so a losing round shows up as an item that doesn't sell, not as a losing sale.
+    // Results count bought items that haven't sold as if sold under today's floor, so an item waiting under
+    // break-even (or in a stop-loss) shows its loss before it sells.
     var held = holding.map(function (p) { return { net: p.now_net, currency: p.currency }; });
     var all = totalText(trades.concat(held)), realised = totalText(trades), open = totalText(held);
     var profitSub = !holding.length ? "after OpenSea fee, royalty and gas" :
@@ -292,6 +300,7 @@
 
     // Rules in plain words, from the current settings
     if ($("simRules").contains(document.activeElement)) return renderRest();
+    var ex = d.exit || {};
     var grace = d.candidate_grace_hours ? " keeps its offer for " + fmt(d.candidate_grace_hours, 0) + " hours in case it passes again (most do), then leaves (after selling anything bought)" : " leaves straight away (after selling anything bought)";
     var scope = d.include_candidates ? "every collection on the Candidates page, the Final list and the ones added here" : "the collections below";
     $("simRules").innerHTML = '<div class="section-title"><h2>How it plays</h2><form class="sim-every" id="simEvery"><label for="simEveryIn">Check every</label> ' +
@@ -304,8 +313,13 @@
       "<li><strong>Fill.</strong> When a real seller sells one for our offer or less, they would have taken ours instead, so we count it as bought at our offer.</li>" +
       "<li><strong>Sell.</strong> We list it " + fmt(d.exit_discount_pct, 0) + "% under the floor and count it sold when a real buyer pays that or more for a floor item." +
       (d.repeat ? " Then we bid again." : "") + "</li>" +
-      "<li><strong>If the floor falls.</strong> We never list below break-even, so the item waits until the floor recovers. Profit so far counts it as if sold under today's floor, so a loss still shows." +
-        (d.max_hold_days ? " After " + fmt(d.max_hold_days, 0) + " days unsold it counts as sold just under today's floor, loss or not, and we bid again." : "") + "</li>" +
+      (ex.lower_after_days ? "<li><strong>Not selling.</strong> Unsold after " + fmt(ex.lower_after_days, 0) + " days, the listing goes " + fmt(ex.lower_step_pct, 0) +
+        "% lower each day, never below break-even.</li>" : "") +
+      "<li><strong>Stop-loss.</strong> The market floor is the " + ordinal(ex.market_floor_rank) + "cheapest listing, one per seller, so one panic listing can't set it. Once it has stayed under break-even for " +
+        fmt(ex.stop_loss_hours, 0) + " hours, we sell at a loss: listed " + fmt(ex.stop_loss_start_pct, 0) + "% under the market floor, " + fmt(ex.lower_step_pct, 0) +
+        "% lower each day (or when a cheaper listing sells first), never more than " + fmt(ex.stop_loss_lowest_pct, 0) + "% under. The best offer is taken once it reaches " +
+        fmt(ex.accept_offer_pct, 0) + "% of our listing; lower offers are lowballs and are refused. Back above break-even for " + fmt(ex.recover_hours, 0) +
+        " hours, it returns to normal selling. After a stop-loss the collection gets no new offer for " + fmt(ex.cool_off_days, 0) + " days.</li>" +
       "<li><strong>Missed fills.</strong> A sale under the floor and above our offer is usually a seller taking someone else's higher collection offer. We count those, and whether our limit would have covered that price.</li>" +
       "<li><strong>How often.</strong> A collection where someone outbid us in the last day is checked every " + esc(hours(d.contested_interval_seconds)) +
       ", one where we've held the best offer unchallenged for a day every " + esc(hours(d.quiet_interval_seconds)) + ", the rest every " + esc(hours(d.interval_seconds)) + ".</li>" +
@@ -332,7 +346,7 @@
     $("simTrades").innerHTML = trades.length ? '<div class="tbl-scroll"><table class="tbl sim-trades"><thead><tr><th>Collection</th><th>Bought</th><th>Sold</th><th>Held</th><th>Profit</th></tr></thead><tbody>' +
       trades.map(function (t) {
         return "<tr><td>" + (t.strategy === "B" ? bTag() : "") + osLink(t.slug, t.name) + '<div class="sub">' + esc(N.fmtDay(t.exit_at)) +
-          (t.how === "removed" ? " · removed, valued at the floor" : t.how === "expired" ? " · held " + fmt(d.max_hold_days, 0) + " days, counted at the floor" : "") + "</div></td><td>" + price(t.entry_price, t.currency) +
+          (t.how === "removed" ? " · removed, valued at the floor" : t.how === "stoploss" ? " · stop-loss, a buyer took our listing" : t.how === "stoploss_offer" ? " · stop-loss, took the best offer" : "") + "</div></td><td>" + price(t.entry_price, t.currency) +
           "</td><td>" + price(t.exit_price, t.currency) + "</td><td>" + esc(hours(t.hold_seconds)) + "</td><td>" + profitHtml(t.net, t.roi_pct, t.currency) + "</td></tr>";
       }).join("") + "</tbody></table></div>" :
       '<p class="chart-note" style="margin-top:0">None yet. A round trip needs a seller to hit our offer, then a buyer to take our listing.</p>';

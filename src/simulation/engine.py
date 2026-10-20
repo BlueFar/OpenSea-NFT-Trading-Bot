@@ -10,6 +10,11 @@ sales for each collection, then:
   than ours, so ours would have been taken: the offer fills at our price.
 - Holding: lists the item the trade model's discount under the floor (never below break-even) and follows the
   floor. A real buyer paying at least our price for a floor item would have bought ours: it sells at our price.
+  Unsold after a few days, the listing goes a little lower each day, still never below break-even.
+- Stop-loss: once the market floor (the 3rd-cheapest listing, one per seller, so one panic listing can't set it)
+  has stayed under break-even for a day, the item is listed under the market floor at a loss, a little lower each
+  day down to a lowest step, and the best offer is taken once it comes within 10% of our listing. Lowball offers
+  are never taken. After a stop-loss the collection gets no new offer for a cool-off period.
 
 Two strategies run side by side on the same market data (one set of OpenSea calls): A keeps the fixed
 min_profit_gap_pct limit; B starts there and lowers its limit step by step while it sits capped without a fill.
@@ -27,7 +32,7 @@ from ..models.collection import SaleEvent
 from ..providers.opensea.client import OpenSeaNetworkError
 from ..trade_model.calculator import extract_fees_from_collection
 from ..utils.logging import setup_logger
-from .store import ACTIVE_STATUSES, MAX_CHECK_GAP_SECONDS, SimStore
+from .store import ACTIVE_STATUSES, EXIT_FIELDS, MAX_CHECK_GAP_SECONDS, SimStore
 
 logger = setup_logger("simulation")
 
@@ -135,12 +140,52 @@ def break_even_ask(entry: float, costs: Costs) -> float:
     return (entry + costs.gas) / max(1e-9, 1 - costs.sell_cut)
 
 
-def target_ask(floor: Optional[float], entry: float, costs: Costs, prev_ask: Optional[float]) -> Optional[float]:
-    """List the discount under the floor, but never below break-even. No floor: keep the listing as it is."""
+def target_ask(floor: Optional[float], entry: float, costs: Costs, prev_ask: Optional[float],
+               discount_pct: Optional[float] = None) -> Optional[float]:
+    """
+    List the discount under the floor (the trade model's, or discount_pct once lowered), but never below
+    break-even. No floor: keep the listing as it is.
+    """
     be = break_even_ask(entry, costs)
+    pct = costs.exit_discount_pct if discount_pct is None else discount_pct
     if floor and floor > 0:
-        return round_up(max(be, floor * (1 - costs.exit_discount_pct / 100.0)))
+        return round_up(max(be, floor * (1 - pct / 100.0)))
     return prev_ask or round_up(be)
+
+
+def lowered_pct(base_pct: float, listed_at: Optional[int], now: int, after_days: float, step_pct: float) -> float:
+    """
+    Normal selling: the discount under the floor once the item has been listed after_days without selling,
+    step_pct more on that day and on each day after (0 days = never lowered).
+    """
+    if not after_days or not listed_at:
+        return base_pct
+    days = (now - listed_at) / 86400.0 - after_days
+    return base_pct if days < 0 else base_pct + step_pct * (int(days) + 1)
+
+
+def stop_loss_pct(ex, started_at: int, now: int, extra_steps: int = 0) -> float:
+    """Stop-loss: the discount under the market floor, a step lower each day (and per undercut), up to the lowest."""
+    steps = int(max(0, now - started_at) // 86400) + (extra_steps or 0)
+    return min(float(ex.stop_loss_lowest_pct), float(ex.stop_loss_start_pct) + float(ex.lower_step_pct) * steps)
+
+
+def market_floor(listings, currency: str, groups, rank: int, exclude=()) -> Optional[float]:
+    """
+    The rank-th cheapest listing price, counting each seller's wallet once (at its cheapest) and never our own.
+    With fewer sellers, the dearest of those there are. None = no comparable listing.
+    """
+    best: Dict[str, float] = {}
+    for x in listings or ():
+        if not x.price_value or x.price_value <= 0 or not same_currency(x.price_currency, currency, groups):
+            continue
+        who = (x.maker or x.order_hash or "").lower()
+        if who in exclude:
+            continue
+        price = x.price_value / max(1, x.remaining_quantity or 1)
+        best[who] = min(price, best.get(who, price))
+    prices = sorted(best.values())
+    return prices[min(rank, len(prices)) - 1] if prices else None
 
 
 def trade_result(entry: float, exit_price: float, costs: Costs) -> Dict[str, float]:
@@ -208,7 +253,8 @@ def closing_trade(pos: Dict[str, Any], exit_discount_pct: float, now: Optional[i
     if not entry or not floor or pos.get("fee_pct") is None:
         return None
     costs = Costs(pos["fee_pct"], pos.get("royalty_pct") or 0.0, pos.get("gas") or 0.0, exit_discount_pct)
-    exit_price = floor * (1 - exit_discount_pct / 100.0)
+    # In a stop-loss the floor is no price we'd get: value it at what we were asking
+    exit_price = pos["ask"] if pos.get("stop_loss_at") and pos.get("ask") else floor * (1 - exit_discount_pct / 100.0)
     r = trade_result(entry, exit_price, costs)
     return {"slug": pos["slug"], "round": pos.get("round"), "currency": pos.get("currency"),
             "entry_price": entry, "entry_at": pos.get("entry_at"), "entry_tx": pos.get("entry_tx"),
@@ -282,6 +328,11 @@ class MarketView:
     def top_offer(self, currency: str, groups):
         return self._get(("top", currency), lambda: self.provider.get_top_offer(
             self.slug, currency_filter=lambda c: same_currency(c, currency, groups)))
+
+    def listings(self):
+        """The cheapest listings (None: OpenSea didn't answer, or the provider can't list them)."""
+        fetch = getattr(self.provider, "get_best_listings", None)
+        return self._get("listings", lambda: fetch(self.slug)) if fetch else None
 
     def sales(self, after: int) -> Tuple[Optional[List[SaleEvent]], bool]:
         """Sales at or after `after`, and whether the download was complete. None = it failed (retry next check)."""
@@ -597,7 +648,8 @@ class PaperTrader:
             events.append((now, slug, kind, message))
 
         p["note"] = None  # only a problem is kept here; a check that gets this far has none
-        if pos["status"] == "bidding" and pos.get("last_tick_at"):
+        cooling = pos["status"] == "bidding" and (pos.get("cool_off_until") or 0) > now
+        if pos["status"] == "bidding" and pos.get("last_tick_at") and not cooling:
             # Time with an offer up since the last check (the track record's fills per week of bidding)
             p["bid_seconds"] = (p.get("bid_seconds") or 0) + min(now - pos["last_tick_at"], MAX_CHECK_GAP_SECONDS)
 
@@ -613,7 +665,7 @@ class PaperTrader:
         groups = currency_groups(p["chain"])
         costs = Costs(p["fee_pct"], p["royalty_pct"], p["gas"], tm.target_sale_discount_from_floor_pct)
 
-        sold_now = False
+        sold_now = pending = False
         # 1. Real sales since the last check: would one of them have taken our offer, or bought our listing?
         if p.get("last_sale_check") is not None:
             after = int(p["last_sale_check"]) - SALE_LOOKBACK_SECONDS
@@ -622,54 +674,164 @@ class PaperTrader:
                 if not complete:
                     say("problem", "More than 1,000 sales since the last check. Only the newest were read, so a "
                                    "fill or sale may have been missed.")
-                sold_now = self._judge_sales(book, p, sales, floor, costs, groups, trades, seen, say)
+                sold_now, pending = self._judge_sales(book, p, sales, floor, costs, groups, trades, seen, say)
                 p["last_sale_check"] = now
         else:
             p["last_sale_check"] = now
 
         # 2. Move our offer or listing for the market as it is now
-        if p["status"] == "bidding" and not sold_now:  # after a sale the next round starts at the next check
+        if p["status"] == "bidding" and not sold_now and cooling:
+            ticks.append((slug, now, p["round"], "cooloff", None, None, floor, None))
+            p["floor"] = floor if floor else p.get("floor")
+        elif p["status"] == "bidding" and not sold_now:  # after a sale the next round starts at the next check
+            if p.get("cool_off_until"):
+                p["cool_off_until"] = None
+                say("start", "Cool-off after the stop-loss is over: bidding again.")
             top_offer = market.top_offer(cur, groups)
             top = top_offer.price_value if top_offer else None
             self._update_bid(book, p, top, floor, costs, now, say)
             ticks.append((slug, now, p["round"], "bidding", p["bid"], top, floor, None))
         elif p["status"] == "holding":
-            prev = p.get("ask")
-            ask = target_ask(floor, p["entry_price"], costs, prev)
-            p["floor"] = floor if floor else p.get("floor")
-            if p.get("listed_at") is None:
-                p["listed_at"] = now
-                be = break_even_ask(p["entry_price"], costs)
-                where = (f"{tm.target_sale_discount_from_floor_pct:g}% under the {fmt_price(floor, cur)} floor"
-                         if floor and ask > round_up(be) else "break-even, the floor is too low for a profit")
-                say("listed", f"Listed it for {fmt_price(ask, cur)} ({where}).")
-            elif prev and ask and abs(ask - prev) / prev >= 0.01:
-                say("repriced", f"Floor moved to {fmt_price(floor, cur)}. Listing moved from "
-                                f"{fmt_price(prev, cur)} to {fmt_price(ask, cur)}.")
-            p["ask"] = ask
-            ticks.append((slug, now, p["round"], "holding", None, None, floor, ask))
-            limit_days = sim.max_hold_days
-            if limit_days and floor and p.get("entry_at") and now - p["entry_at"] >= limit_days * 86400:
-                # Held too long: counted as sold just under today's floor, loss or not, so money isn't stuck
-                t = closing_trade(p, tm.target_sale_discount_from_floor_pct, now)
-                if t:
-                    t["how"] = "expired"
-                    trades.append(t)
-                    say("expired", f"Held {fmt_duration(now - p['entry_at'])} without selling, so it counts as sold "
-                                   f"at {fmt_price(t['exit_price'], cur)}, {tm.target_sale_discount_from_floor_pct:g}% "
-                                   f"under today's floor: {'profit' if t['net'] >= 0 else 'loss'} "
-                                   f"{fmt_price(abs(t['net']), cur)} ({t['roi_pct']:+.0f}%).")
-                    p["capped_since"] = None
-                    self._next_round(p, say)
+            self._hold(book, p, floor, costs, groups, market, now, pending, ticks, trades, say)
         p["last_tick_at"] = now
 
         if not book.store.save_round(p, rev, events, ticks, trades, seen):
             logger.info("Simulation: %s (strategy %s) was changed during the check; skipped this round.",
                         slug, book.strategy)
 
+    def _hold(self, book: Book, p: Dict[str, Any], floor: Optional[float], costs: Costs, groups,
+              market: MarketView, now: int, pending: bool, ticks, trades, say) -> None:
+        """
+        Prices the listing of a bought item. Normal: just under the floor, lower each day once unsold for a few
+        days, never below break-even. Stop-loss (market floor under break-even for a day): under the market floor
+        at a loss, a step lower each day down to the lowest step, and the best offer is taken once it is within
+        reach of our listing.
+        """
+        ex, tm = self.sim.exit, self.config.trade_model
+        slug, cur, entry = p["slug"], p["currency"], p["entry_price"]
+        be = break_even_ask(entry, costs)
+        prev, last = p.get("ask"), p.get("last_tick_at") or now
+        p["floor"] = floor if floor else p.get("floor")
+        # The market floor is at or above the cheapest listing, so it's only read when that is under break-even
+        mf = floor
+        if floor and floor < be:
+            listings = market.listings()
+            own = {w.lower() for w in ex.own_wallets}
+            mf = market_floor(listings, cur, groups, ex.market_floor_rank, own) if listings else None
+            mf = max(mf, floor) if mf else floor
+        if floor:
+            p["market_floor"] = mf
+        started = self._stop_loss_clock(p, mf, be, now, say)
+        if p.get("stop_loss_at"):
+            pct = stop_loss_pct(ex, p["stop_loss_at"], now, p.get("sl_steps"))
+            was = stop_loss_pct(ex, p["stop_loss_at"], last, p.get("sl_steps")) if last >= p["stop_loss_at"] else pct
+            ask = round_up(mf * (1 - pct / 100.0)) if mf else prev
+            phase = "stoploss"
+            take = ask * ex.accept_offer_pct / 100.0 if ask else None
+            if started:
+                say("stoploss", f"The market floor has stayed under our break-even ({fmt_price(be, cur)}) for "
+                                f"{ex.stop_loss_hours:g} hours, so the stop-loss starts: listed at {fmt_price(ask, cur)}, "
+                                f"{pct:g}% under the {fmt_price(mf, cur)} market floor, a step lower each day down "
+                                f"to {ex.stop_loss_lowest_pct:g}% under. Any offer of {fmt_price(take, cur)} or more "
+                                f"is taken.")
+            elif pct > was:
+                say("lowered", f"Stop-loss: no sale yet, so the listing goes to {pct:g}% under the "
+                               f"{fmt_price(mf, cur)} market floor: {fmt_price(ask, cur)}.")
+            elif prev and ask and abs(ask - prev) / prev >= 0.01:
+                say("repriced", f"Market floor moved to {fmt_price(mf, cur)}. Stop-loss listing moved from "
+                                f"{fmt_price(prev, cur)} to {fmt_price(ask, cur)}.")
+        else:
+            base = tm.target_sale_discount_from_floor_pct
+            pct = lowered_pct(base, p.get("listed_at"), now, ex.lower_after_days, ex.lower_step_pct)
+            was = lowered_pct(base, p.get("listed_at"), last, ex.lower_after_days, ex.lower_step_pct)
+            ask = target_ask(floor, entry, costs, prev, discount_pct=pct)
+            phase = "holding"
+            if p.get("listed_at") is None:
+                p["listed_at"] = now
+                where = (f"{base:g}% under the {fmt_price(floor, cur)} floor"
+                         if floor and ask > round_up(be) else "break-even, the floor is too low for a profit")
+                say("listed", f"Listed it for {fmt_price(ask, cur)} ({where}).")
+            elif pct > was and prev and ask and ask < prev:
+                at_be = ask <= round_up(be)
+                say("lowered", f"Unsold for {fmt_duration(now - p['listed_at'])}, so the listing goes lower: "
+                               f"{fmt_price(ask, cur)}" + (" (break-even, never lower while in profit)." if at_be
+                                                           else f", {pct:g}% under the {fmt_price(floor, cur)} floor."))
+            elif prev and ask and abs(ask - prev) / prev >= 0.01:
+                say("repriced", f"Floor moved to {fmt_price(floor, cur)}. Listing moved from "
+                                f"{fmt_price(prev, cur)} to {fmt_price(ask, cur)}.")
+        if p.get("listed_at") is None:
+            p["listed_at"] = now
+        p["ask"] = ask
+        ticks.append((slug, now, p["round"], phase, None, None, floor, ask))
+        # Under break-even, an offer close to our listing gets us out at once (judged after this check's sales)
+        if phase == "stoploss" and ask and not pending:
+            top_offer = market.top_offer(cur, groups)
+            top = top_offer.price_value if top_offer else None
+            if top and top >= ask * ex.accept_offer_pct / 100.0:
+                self._take_offer(book, p, top, ask, costs, now, trades, say)
+
+    def _stop_loss_clock(self, p: Dict[str, Any], mf: Optional[float], be: float, now: int, say) -> bool:
+        """
+        Counts how long the market floor has been under break-even; True when the stop-loss starts on this check.
+        One reading above doesn't reset the clock: only recover_hours above break-even on every check does.
+        """
+        ex, cur = self.sim.exit, p["currency"]
+        if not mf:
+            return False
+        if mf < be:
+            p["above_since"] = None
+            if p.get("stop_loss_at"):
+                return False
+            if p.get("under_since") is None:
+                p["under_since"] = now
+                if ex.stop_loss_hours > 0:
+                    say("under", f"The market floor ({fmt_price(mf, cur)}) is under our break-even "
+                                 f"({fmt_price(be, cur)}). If it stays there for {ex.stop_loss_hours:g} hours, the "
+                                 f"stop-loss starts.")
+            if now - p["under_since"] >= ex.stop_loss_hours * 3600:
+                p["stop_loss_at"], p["sl_steps"] = now, 0
+                return True
+            return False
+        if p.get("under_since") is None and not p.get("stop_loss_at"):
+            return False
+        if p.get("above_since") is None:
+            p["above_since"] = now
+        if now - p["above_since"] >= ex.recover_hours * 3600:
+            was = p.get("stop_loss_at")
+            p.update({"under_since": None, "above_since": None, "stop_loss_at": None, "sl_steps": 0})
+            say("recovered", f"The market floor ({fmt_price(mf, cur)}) has been back above break-even for "
+                             f"{ex.recover_hours:g} hours: " + ("the stop-loss is off, back to normal selling."
+                                                                 if was else "the stop-loss clock is reset."))
+        return False
+
+    def _take_offer(self, book: Book, p, top: float, ask: float, costs: Costs, now: int, trades, say) -> None:
+        """Stop-loss: accept the best collection offer (we pay the gas to accept it, on top of the usual)."""
+        cur = p["currency"]
+        accept = Costs(costs.fee_pct, costs.royalty_pct, costs.gas * 2, costs.exit_discount_pct)
+        r = trade_result(p["entry_price"], top, accept)
+        trades.append(self._trade(p, top, now, None, r, "stoploss_offer"))
+        say("sold", f"Stop-loss: took the best offer of {fmt_price(top, cur)} ({top / ask * 100:.0f}% of our "
+                    f"{fmt_price(ask, cur)} listing). Loss {fmt_price(abs(r['net']), cur)} ({r['roi_pct']:+.0f}%) "
+                    f"after OpenSea fee, royalty and gas." if r["net"] < 0 else
+            f"Stop-loss: took the best offer of {fmt_price(top, cur)}. Profit {fmt_price(r['net'], cur)}.")
+        self._after_sale(book, p, now, say, stop_loss=True)
+
+    def _trade(self, p, exit_price: float, exit_at: int, exit_tx, r: Dict[str, float], how: str) -> Dict[str, Any]:
+        return {
+            "slug": p["slug"], "round": p["round"], "currency": p["currency"],
+            "entry_price": p["entry_price"], "entry_at": p["entry_at"], "entry_tx": p["entry_tx"],
+            "entry_token": p["entry_token"], "entry_metrics": p.get("entry_metrics"),
+            "exit_price": exit_price, "exit_at": exit_at,
+            "exit_tx": exit_tx, "fees": r["fees"], "gas": r["gas"], "net": r["net"],
+            "roi_pct": r["roi_pct"], "times_outbid": p.get("times_outbid") or 0, "how": how,
+        }
+
     def _judge_sales(self, book: Book, p, sales: List[SaleEvent], floor, costs: Costs, groups, trades, seen,
-                     say) -> bool:
-        """Judges each real sale once, oldest first, against the offer or listing that stood at that moment."""
+                     say) -> Tuple[bool, bool]:
+        """
+        Judges each real sale once, oldest first, against the offer or listing that stood at that moment.
+        Returns (sold, a sale is still waiting for its OpenSea order look-up).
+        """
         slug, cur = p["slug"], p["currency"]
         fresh = sorted((e for e in sales if e.event_id), key=lambda e: e.event_timestamp)
         already = book.store.seen_sales(slug, (e.event_id for e in fresh))
@@ -677,7 +839,7 @@ class PaperTrader:
         round_ticks = book.store.get_ticks(slug, round_no=p["round"])
         budget = [ORDER_LOOKUPS_PER_CHECK]
         max_pct = self.config.filters.trading_frequency.floor_sale_max_pct
-        sold = False
+        sold = waiting = undercut = False
         for ev in fresh:
             if ev.event_id in already:
                 continue
@@ -694,7 +856,7 @@ class PaperTrader:
                 if verdict == "fill":
                     p.update({"status": "holding", "entry_price": t["bid"], "entry_at": ev.event_timestamp,
                               "entry_tx": ev.transaction, "entry_token": ev.token_id, "ask": None, "listed_at": None,
-                              "entry_metrics": self._bot_metrics(slug)})
+                              "entry_metrics": self._bot_metrics(slug), **EXIT_FIELDS})
                     say("filled", f"Offer filled: bought #{ev.token_id or '?'} for {fmt_price(t['bid'], cur)}. "
                                   f"A seller sold one for {fmt_price(price, cur)}, less than our offer, "
                                   f"so ours would have been taken.")
@@ -703,26 +865,51 @@ class PaperTrader:
                                    f"doesn't show it as an accepted offer (likely a private sale or transfer).")
                 elif verdict == "no":
                     pending = self._missed_fill(book, p, ev, price, t, floor, costs, budget, say)
-            elif (p["status"] == "holding" and t["phase"] == "holding" and t["ask"]
+            elif (p["status"] == "holding" and t["phase"] in ("holding", "stoploss") and t["ask"]
                   and ev.event_timestamp >= (p.get("listed_at") or 0)):
                 ask = t["ask"]
-                # Ours is the cheapest listing only at or under the floor. Held at break-even above it, a sale
-                # counts once the floor has risen to our price (the cheaper listings were bought).
-                ref_floor = max(t["floor"] or 0.0, floor or 0.0)
-                cheapest = not ref_floor or ask <= ref_floor
+                stop = t["phase"] == "stoploss"
+                if stop:
+                    # A stop-loss listing must have been the cheapest the whole time: under the lower of the floors
+                    # at the check that set it and this one (a falling floor doesn't flatter it)
+                    floors = [f for f in (t["floor"], floor) if f]
+                    ref_floor = min(floors) if floors else 0.0
+                    cheapest = bool(ref_floor) and ask <= ref_floor
+                else:
+                    # Ours is the cheapest listing only at or under the floor. Held at break-even above it, a sale
+                    # counts once the floor has risen to our price (the cheaper listings were bought).
+                    ref_floor = max(t["floor"] or 0.0, floor or 0.0)
+                    cheapest = not ref_floor or ask <= ref_floor
                 # Far above the floor is a rare item's buyer, not a floor buyer
                 if price >= ask and cheapest and (not ref_floor or price <= ref_floor * max_pct / 100.0):
                     kind, offer_type = self._order(ev, budget)
                     pending = kind == "pending"
-                    # A seller accepting an offer for one particular item is not a buyer choosing a listing
-                    if not pending and not (kind == "offer" and offer_type in ("trait", "item")):
-                        self._sell(book, p, ev, price, ask, costs, trades, say)
+                    if stop:
+                        # Only a buyer taking a listing buys ours (a seller accepting a bid is not a buyer)
+                        ok = kind == "listing" or (kind is None and price >= ref_floor)
+                    else:
+                        # A seller accepting an offer for one particular item is not a buyer choosing a listing
+                        ok = not (kind == "offer" and offer_type in ("trait", "item"))
+                    if not pending and ok:
+                        self._sell(book, p, ev, price, ask, costs, trades, say, how="stoploss" if stop else "sold")
                         round_ticks = []  # the next round has no prices yet
                         sold = True
+                elif stop and p.get("stop_loss_at") and price < ask and not undercut:
+                    # Another seller's cheaper listing sold before ours: our listing goes a step lower
+                    kind, _ = self._order(ev, budget)
+                    pending = kind == "pending"
+                    ex = self.sim.exit
+                    if kind == "listing" and stop_loss_pct(ex, p["stop_loss_at"], ev.event_timestamp,
+                                                           p.get("sl_steps")) < ex.stop_loss_lowest_pct:
+                        undercut = True
+                        p["sl_steps"] = (p.get("sl_steps") or 0) + 1
+                        say("undercut", f"A cheaper listing sold first ({fmt_price(price, cur)}, under our "
+                                        f"{fmt_price(ask, cur)}): the stop-loss listing goes a step lower.")
             if not pending:
                 seen.append((slug, ev.event_id, ev.event_timestamp))
                 already.add(ev.event_id)
-        return sold
+            waiting = waiting or pending
+        return sold, waiting
 
     def _missed_fill(self, book: Book, p, ev: SaleEvent, price: float, t, floor, costs: Costs, budget,
                      say) -> bool:
@@ -766,21 +953,18 @@ class PaperTrader:
             return "pending"
         return "fill" if kind == "offer" else "ignored"
 
-    def _sell(self, book: Book, p, ev, price, ask, costs: Costs, trades, say) -> None:
+    def _sell(self, book: Book, p, ev, price, ask, costs: Costs, trades, say, how: str = "sold") -> None:
         cur = p["currency"]
         r = trade_result(p["entry_price"], ask, costs)
-        trades.append({
-            "slug": p["slug"], "round": p["round"], "currency": cur,
-            "entry_price": p["entry_price"], "entry_at": p["entry_at"], "entry_tx": p["entry_tx"],
-            "entry_token": p["entry_token"], "entry_metrics": p.get("entry_metrics"),
-            "exit_price": ask, "exit_at": ev.event_timestamp,
-            "exit_tx": ev.transaction, "fees": r["fees"], "gas": r["gas"], "net": r["net"],
-            "roi_pct": r["roi_pct"], "times_outbid": p.get("times_outbid") or 0, "how": "sold",
-        })
+        trades.append(self._trade(p, ask, ev.event_timestamp, ev.transaction, r, how))
         held = fmt_duration(ev.event_timestamp - (p["entry_at"] or ev.event_timestamp))
-        say("sold", f"Sold for {fmt_price(ask, cur)} after {held}: a buyer paid {fmt_price(price, cur)} for one. "
+        say("sold", f"{'Stop-loss: sold' if how == 'stoploss' else 'Sold'} for {fmt_price(ask, cur)} after {held}: "
+                    f"a buyer paid {fmt_price(price, cur)} for one. "
                     f"{'Profit' if r['net'] >= 0 else 'Loss'} {fmt_price(abs(r['net']), cur)} "
                     f"({r['roi_pct']:+.0f}%) after OpenSea fee, royalty and gas.")
+        self._after_sale(book, p, ev.event_timestamp, say, stop_loss=how == "stoploss")
+
+    def _after_sale(self, book: Book, p, now: int, say, stop_loss: bool = False) -> None:
         if book.strategy == "B" and p.get("limit_pct") is not None:
             # A sale: step the limit back up towards the full margin
             b = self.sim.strategy_b
@@ -790,9 +974,14 @@ class PaperTrader:
             p["limit_pct"] = up
         p["capped_since"] = None
         self._next_round(p, say)
+        if stop_loss and p["status"] == "bidding" and self.sim.exit.cool_off_days > 0:
+            days = self.sim.exit.cool_off_days
+            p["cool_off_until"] = int(now + days * 86400)
+            say("cooloff", f"After a stop-loss, no new offer on this collection for {days:g} days.")
 
     def _next_round(self, p: Dict[str, Any], say) -> None:
-        """After the item is gone (sold, or held too long): leave, bid again, or stop."""
+        """After the item is gone: leave, bid again, or stop."""
+        p.update(EXIT_FIELDS)
         if p.get("leaving"):
             say("remove", "Off the Candidates list, so it leaves the simulation now the item has sold.")
             p.update({"status": "removed", "auto_stopped": 1, "leaving": 0, "entry_price": None, "entry_at": None,

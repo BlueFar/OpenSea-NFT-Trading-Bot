@@ -7,11 +7,11 @@ import pytest
 import yaml
 
 from src.config.settings import load_config
-from src.models.collection import CollectionMetadata, CollectionStats, Contract, Fee, Offer, SaleEvent
+from src.models.collection import CollectionMetadata, CollectionStats, Contract, Fee, Listing, Offer, SaleEvent
 from src.simulation.engine import (
     ORDER_LOOKUPS_PER_CHECK, Book, MarketView,
-    Costs, PaperTrader, break_even_ask, decide_bid, describe_position, gap_pct, max_bid_for_gap,
-    outbid_price, round_down, target_ask, trade_result,
+    Costs, PaperTrader, break_even_ask, decide_bid, describe_position, gap_pct, lowered_pct, market_floor,
+    max_bid_for_gap, outbid_price, round_down, round_up, target_ask, trade_result,
 )
 from src.simulation.store import SimStore
 from src.storage.state_store import StateStore
@@ -85,6 +85,7 @@ class FakeMarket:
                                        fees=[Fee(5.0, "0xcreator", True), Fee(1.0, OPENSEA_FEE_WALLET, True)],
                                        raw_data={"image_url": "https://img/x.png"})
         self.order_lookups = 0
+        self.listings = None  # (price, seller) pairs for get_best_listings; None = OpenSea didn't answer
 
     def get_collection(self, slug):
         return self.coll
@@ -99,6 +100,12 @@ class FakeMarket:
 
     def get_sale_events(self, slug, after_timestamp, max_pages=3, **kw):
         return [e for e in self.sales if e.event_timestamp >= after_timestamp]
+
+    def get_best_listings(self, slug, limit=30):
+        if self.listings is None:
+            return None
+        return [Listing(order_hash=f"l{i}", chain="ethereum", price_value=pr, price_currency="ETH", maker=who)
+                for i, (pr, who) in enumerate(sorted(self.listings))]
 
     def get_order_info(self, chain, protocol, order_hash):
         self.order_lookups += 1
@@ -998,9 +1005,10 @@ def test_track_record_verdicts():
     fresh = {**base, "status": "holding", "entry_price": 0.2, "entry_at": now - 3600}
     r = track_record(fresh, [sale(0.01, 20.0, 1), sale(0.01, 20.0, 1)], 5.0, now)
     assert r["verdict"] == "not_yet" and "puts it down overall" in r["why"]
-    # Items that never sold within the holding limit keep it from being proven, even at a small profit
-    r = track_record(base, [sale(0.01, 10.0, 0.5), sale(0.01, 10.0, 0.5), sale(0.001, 0.5, 14, how="expired")], 5.0, now)
-    assert r["verdict"] == "not_yet" and r["why"].startswith("1 of 3 items bought didn't sell")
+    # A stop-loss is a sale at a loss: never proven, and the reason says so
+    r = track_record(base, [sale(0.05, 50.0, 0.5), sale(0.05, 50.0, 0.5), sale(-0.02, -20.0, 3, how="stoploss")], 5.0, now)
+    assert r["verdict"] == "not_yet" and r["why"].startswith("1 of 3 trades lost money (1 in a stop-loss), up")
+    assert r["sales"] == 3 and r["stop_losses"] == 1
 
     # Holding an item now worth less than it cost: not judged for a few days, then losing
     held = {**base, "status": "holding", "entry_price": 0.1, "entry_at": now - 86400, "ask": 0.11}
@@ -1113,23 +1121,141 @@ def test_a_candidate_back_within_the_grace_period_keeps_its_offer(tmp_path):
     assert t.store.get_position("kongz")["status"] == "removed"
 
 
-def test_an_item_held_too_long_counts_as_sold_at_todays_floor(tmp_path):
-    m, t, state, t0 = _holding(tmp_path, max_hold_days=14)
-    m.floor = 0.05                                 # under what we paid: it never sells
-    t.tick(now=t0 + 13 * 86400)
-    assert t.store.get_position("kongz")["status"] == "holding"
-    t.tick(now=t0 + 100 + 14 * 86400)
+def test_market_floor_ignores_one_panic_listing_and_our_own():
+    groups = ["ETH", "WETH"]
+    ls = [Listing(f"h{i}", "ethereum", pr, "ETH", maker=who) for i, (pr, who) in enumerate(
+        [(0.03, "panic"), (0.05, "a"), (0.0505, "a"), (0.051, "b"), (0.052, "c"), (0.04, "us")])]
+    assert market_floor(ls, "ETH", groups, 3, exclude={"us"}) == 0.051   # 3rd seller; "a" counts once
+    assert market_floor(ls, "ETH", groups, 1, exclude={"us"}) == 0.03
+    assert market_floor(ls[:2], "ETH", groups, 3) == 0.05                 # fewer sellers: the dearest there is
+    assert market_floor([Listing("x", "ethereum", 9.0, "USDC", maker="z")], "ETH", groups, 3) is None
+    # Normal lowering: after 3 days unsold, 3% more each day
+    L = 1000
+    assert lowered_pct(5.0, L, L + 3 * 86400 - 1, 3.0, 3.0) == 5.0
+    assert lowered_pct(5.0, L, L + 3 * 86400, 3.0, 3.0) == 8.0
+    assert lowered_pct(5.0, L, L + 5 * 86400 + 5, 3.0, 3.0) == 14.0
+    assert lowered_pct(5.0, L, L + 50 * 86400, 0, 3.0) == 5.0            # 0 days = never
+
+
+def test_an_unsold_listing_goes_lower_each_day_but_never_below_break_even(tmp_path):
+    m, t, _, t0 = _holding(tmp_path)
+    listed = t.store.get_position("kongz")["listed_at"]
+    t.tick(now=listed + 3 * 86400 - 600)
+    assert t.store.get_position("kongz")["ask"] == 0.1034
+    t.tick(now=listed + 3 * 86400)
     p = t.store.get_position("kongz")
-    assert p["status"] == "bidding" and p["round"] == 2 and p["entry_price"] is None
+    assert p["ask"] == round_up(0.1088 * 0.92) and "lowered" in _kinds(t)
+    t.tick(now=listed + 40 * 86400)                # far past: held at break-even, never a loss
+    p = t.store.get_position("kongz")
+    assert p["ask"] == round_up(break_even_ask(0.05966, COSTS)) and p["stop_loss_at"] is None
+    assert not t.store.get_trades()
+
+
+def _kinds(t, n=4):
+    """The kinds of the newest few events, newest first."""
+    return [e["kind"] for e in t.store.get_events()[:n]]
+
+
+def _stop_loss(tmp_path):
+    """Bought at 0.05966 (break-even ~0.0688); the floor falls to 0.05 and stays a day: the stop-loss starts."""
+    m, t, state, t0 = _holding(tmp_path)
+    m.floor, m.top = 0.05, 0.02                    # crash, and the best offer is a lowball
+    m.listings = [(0.05, "a"), (0.051, "b"), (0.052, "c"), (0.06, "d")]
+    t1 = t0 + 1000
+    t.tick(now=t1)
+    p = t.store.get_position("kongz")
+    assert p["under_since"] == t1 and p["stop_loss_at"] is None and p["market_floor"] == 0.052
+    assert "under" in _kinds(t)
+    t.tick(now=t1 + 12 * 3600)
+    assert t.store.get_position("kongz")["stop_loss_at"] is None
+    t.tick(now=t1 + 24 * 3600)
+    p = t.store.get_position("kongz")
+    assert p["status"] == "holding" and p["stop_loss_at"] == t1 + 24 * 3600
+    assert p["ask"] == round_up(0.052 * 0.95)      # 5% under the market floor, at a loss
+    assert "stoploss" in _kinds(t)
+    return m, t, state, t1 + 24 * 3600
+
+
+def test_stop_loss_lowers_daily_sells_only_to_a_real_listing_buyer_then_cools_off(tmp_path):
+    m, t, _, ts = _stop_loss(tmp_path)
+    m.sale(ts + 100, 0.0496, order_hash="0xbid")    # a seller accepting a bid is not a buyer of our listing
+    m.orders["0xbid"] = {"kind": "offer", "offer_type": "collection"}
+    t.tick(now=ts + 900)
+    assert t.store.get_position("kongz")["status"] == "holding"
+    t.tick(now=ts + 86400)                          # a day with no sale: a step lower
+    p = t.store.get_position("kongz")
+    assert p["ask"] == round_up(0.052 * 0.92) and "lowered" in _kinds(t)
+    t.tick(now=ts + 30 * 86400)                     # never further than 20% under
+    assert t.store.get_position("kongz")["ask"] == round_up(0.052 * 0.80)
+    ask = t.store.get_position("kongz")["ask"]
+    m.sale(ts + 30 * 86400 + 100, 0.0425, order_hash="0xbuy")
+    m.orders["0xbuy"] = {"kind": "listing", "offer_type": None}
+    t.tick(now=ts + 30 * 86400 + 900)
+    p = t.store.get_position("kongz")
+    assert p["status"] == "bidding" and p["round"] == 2 and p["stop_loss_at"] is None
     [trade] = t.store.get_trades()
-    assert trade["how"] == "expired" and trade["exit_price"] == pytest.approx(0.0475) and trade["net"] < 0
-    assert t.store.get_last_events()["kongz"]["kind"] == "expired"
-    from src.simulation.record import track_record
-    pos = t.store.get_position("kongz")
-    pos["bid_seconds"] = 86400
-    assert track_record(pos, t.store.get_trades(), 5.0, t0 + 15 * 86400)["verdict"] == "losing"
-    # 0 = no limit
-    m2, t2, _, t1 = _holding(tmp_path / "b", max_hold_days=0)
-    m2.floor = 0.05
-    t2.tick(now=t1 + 100 + 30 * 86400)
-    assert t2.store.get_position("kongz")["status"] == "holding"
+    assert trade["how"] == "stoploss" and trade["exit_price"] == ask and trade["net"] < 0
+    assert trade["net"] == pytest.approx(trade_result(0.05966, ask, COSTS)["net"])
+    # Cool-off: no offer for 7 days, and sales in that time never fill
+    cool = p["cool_off_until"]
+    assert cool == ts + 30 * 86400 + 100 + 7 * 86400
+    m.sale(ts + 30 * 86400 + 1000, 0.01)
+    t.tick(now=ts + 30 * 86400 + 1800)
+    p = t.store.get_position("kongz")
+    assert p["status"] == "bidding" and p["bid"] is None
+    t.tick(now=cool + 60)
+    p = t.store.get_position("kongz")
+    assert p["bid"] is not None and p["cool_off_until"] is None and p["entry_price"] is None
+
+
+def test_stop_loss_takes_an_offer_within_10pct_of_our_listing(tmp_path):
+    m, t, _, ts = _stop_loss(tmp_path)
+    ask = t.store.get_position("kongz")["ask"]      # 0.0494
+    m.top = 0.044                                   # 89% of our listing: still a lowball
+    t.tick(now=ts + 900)
+    assert t.store.get_position("kongz")["status"] == "holding"
+    m.top = 0.045                                   # 91%: taken
+    t.tick(now=ts + 1800)
+    [trade] = t.store.get_trades()
+    accept = Costs(1.0, 5.0, 0.01, 5.0)             # we pay the gas to accept it
+    assert trade["how"] == "stoploss_offer" and trade["exit_price"] == 0.045 and trade["exit_at"] == ts + 1800
+    assert trade["net"] == pytest.approx(trade_result(0.05966, 0.045, accept)["net"])
+    assert t.store.get_position("kongz")["status"] == "bidding"
+
+
+def test_stop_loss_listing_doesnt_count_sales_while_the_floor_falls_under_it(tmp_path):
+    m, t, _, ts = _stop_loss(tmp_path)
+    ask = t.store.get_position("kongz")["ask"]
+    m.floor = 0.045                                 # cheaper listings arrived after our price was set
+    m.sale(ts + 100, ask + 0.0001, order_hash="0xbuy")
+    m.orders["0xbuy"] = {"kind": "listing", "offer_type": None}
+    t.tick(now=ts + 900)
+    assert t.store.get_position("kongz")["status"] == "holding" and not t.store.get_trades()
+
+
+def test_stop_loss_clock_needs_two_hours_back_above_break_even_to_reset(tmp_path):
+    m, t, _, t0 = _holding(tmp_path)
+    m.floor, m.top, m.listings = 0.05, 0.02, None   # no listings answer: the floor stands in
+    t1 = t0 + 1000
+    t.tick(now=t1)
+    assert t.store.get_position("kongz")["under_since"] == t1
+    m.floor = 0.1                                   # one reading back above doesn't reset it
+    t.tick(now=t1 + 3600)
+    m.floor = 0.05
+    t.tick(now=t1 + 2 * 3600)
+    assert t.store.get_position("kongz")["under_since"] == t1
+    m.floor = 0.1                                   # two hours above: reset
+    t.tick(now=t1 + 3 * 3600)
+    t.tick(now=t1 + 5 * 3600)
+    p = t.store.get_position("kongz")
+    assert p["under_since"] is None and "recovered" in _kinds(t)
+    # A stop-loss that recovers goes back to normal selling, never selling at a loss after the bounce
+    m.floor = 0.05
+    t.tick(now=t1 + 6 * 3600)
+    t.tick(now=t1 + 30 * 3600 + 60)
+    assert t.store.get_position("kongz")["stop_loss_at"] is not None
+    m.floor = 0.1088
+    t.tick(now=t1 + 31 * 3600)
+    t.tick(now=t1 + 33 * 3600 + 60)
+    p = t.store.get_position("kongz")
+    assert p["stop_loss_at"] is None and p["ask"] >= round_up(break_even_ask(0.05966, COSTS))

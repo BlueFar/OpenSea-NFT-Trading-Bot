@@ -142,6 +142,21 @@ class StrategyBConfig(BaseModel):
     lowest_gap_pct: float = Field(25.0, ge=0)   # Never below this; after a sale it steps back up by step_pct
 
 
+class ExitConfig(BaseModel):
+    """How a bought item is sold when it doesn't sell at the normal price. Fully automatic: nothing asks the owner."""
+    lower_after_days: float = Field(3.0, ge=0)        # Unsold this long (in profit): lower the listing every day...
+    lower_step_pct: float = Field(3.0, gt=0)          # ...by this much more under the floor, never below break-even
+    stop_loss_hours: float = Field(24.0, ge=0)        # Market floor under break-even this long: start the stop-loss
+    recover_hours: float = Field(2.0, ge=0)           # Back above break-even this long: the clock resets
+    stop_loss_start_pct: float = Field(5.0, ge=0)     # Stop-loss listing: this far under the market floor at first,
+    stop_loss_lowest_pct: float = Field(20.0, ge=0)   # going lower_step_pct lower each day, never further than this
+    accept_offer_pct: float = Field(90.0, gt=0)       # Under break-even: take the best offer once it reaches this %
+                                                      # of our listing price (lower is a lowball)
+    cool_off_days: float = Field(7.0, ge=0)           # After a stop-loss, no new offer on that collection this long
+    market_floor_rank: int = Field(3, ge=1)           # Market floor = this cheapest listing, one per seller wallet
+    own_wallets: List[str] = Field(default_factory=list)  # Our listings never count as the market floor (live bot)
+
+
 class SimulationConfig(BaseModel):
     """Paper trading: hold the best offer on these collections and sell what fills just under the floor."""
     enabled: bool = True
@@ -157,8 +172,7 @@ class SimulationConfig(BaseModel):
     repeat: bool = True                                  # After selling, place a new offer
     strategy_b: StrategyBConfig = Field(default_factory=StrategyBConfig)
     candidate_grace_hours: float = Field(24.0, ge=0)     # A candidate that stops passing keeps its offer this long
-    max_hold_days: float = Field(14.0, ge=0)             # A bought item unsold after this long counts as sold at
-                                                         # today's floor, loss or not (0 = wait for a real sale)
+    exit: ExitConfig = Field(default_factory=ExitConfig)
 
 class BotConfig(BaseModel):
     general: GeneralConfig = Field(default_factory=GeneralConfig)

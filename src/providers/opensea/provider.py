@@ -271,6 +271,14 @@ class OpenSeaProvider(CollectionDataProvider):
 
         return total_count, False
 
+    def get_best_listings(self, slug: str, limit: int = 30) -> Optional[List[Listing]]:
+        """The cheapest active listings, cheapest first (one call). None = OpenSea didn't answer."""
+        data = self.client.get(f"/api/v2/listings/collection/{slug}/best", params={"limit": limit})
+        if data is None:
+            return None
+        listings, _ = parse_listings(data)
+        return sorted(listings, key=lambda x: x.price_value / max(1, x.remaining_quantity or 1))
+
     def get_top_offer(self, slug: str, currency_filter: Optional[Callable[[str], bool]] = None) -> Optional[Offer]:
         """
         Fetches the highest active collection offer (per NFT) for a collection.

@@ -14,13 +14,20 @@ POSITION_COLUMNS = (
     "source", "auto_stopped", "leaving", "trial_round", "trial_state", "trial_started_at",
     "last_outbid_at", "missed_fills", "missed_above_limit", "limit_pct", "capped_since",
     "bid_seconds", "entry_metrics", "dropped_at",
+    "market_floor", "under_since", "above_since", "stop_loss_at", "sl_steps", "cool_off_until",
 )
 # Added after the first release: (column, type) brought into older databases
 LATER_COLUMNS = (("leaving", "INTEGER DEFAULT 0"), ("trial_round", "INTEGER"), ("trial_state", "TEXT"),
                  ("trial_started_at", "INTEGER"), ("last_outbid_at", "INTEGER"),
                  ("missed_fills", "INTEGER DEFAULT 0"), ("missed_above_limit", "INTEGER DEFAULT 0"),
                  ("limit_pct", "REAL"), ("capped_since", "INTEGER"),
-                 ("bid_seconds", "REAL DEFAULT 0"), ("entry_metrics", "TEXT"), ("dropped_at", "INTEGER"))
+                 ("bid_seconds", "REAL DEFAULT 0"), ("entry_metrics", "TEXT"), ("dropped_at", "INTEGER"),
+                 ("market_floor", "REAL"), ("under_since", "INTEGER"), ("above_since", "INTEGER"),
+                 ("stop_loss_at", "INTEGER"), ("sl_steps", "INTEGER DEFAULT 0"), ("cool_off_until", "INTEGER"))
+# Trades that are real sales (a buyer took our listing, or we took an offer); "removed" is only a valuation
+SALE_KINDS = ("sold", "stoploss", "stoploss_offer")
+# A held item's selling state, cleared once it is gone
+EXIT_FIELDS = {"market_floor": None, "under_since": None, "above_since": None, "stop_loss_at": None, "sl_steps": 0}
 # Longest gap between two checks counted as time spent bidding (the bot may have been off)
 MAX_CHECK_GAP_SECONDS = 3600
 # Strategy A (the rules shown on the dashboard) keeps the original sim_ tables; strategy B, a second set of
@@ -291,7 +298,7 @@ class SimStore:
                 fields.update({"listed_at": None, "ask": None, "last_sale_check": None})
             if action == "remove" and closing_trade:
                 fields.update({"entry_price": None, "entry_at": None, "entry_tx": None, "entry_token": None,
-                               "ask": None, "listed_at": None, "entry_metrics": None})
+                               "ask": None, "listed_at": None, "entry_metrics": None, **EXIT_FIELDS})
                 keys = list(closing_trade.keys())
                 conn.execute(f"INSERT INTO {self.T_TRADES} ({', '.join(keys)}) VALUES ({', '.join('?' * len(keys))})",
                              [closing_trade[k] for k in keys])
@@ -360,9 +367,10 @@ class SimStore:
         return out
 
     def get_round_sales(self, slug: str, from_round: int) -> List[Dict[str, Any]]:
-        """Completed rounds (sold, or held too long and counted at the floor; not removals) from a round on."""
+        """Completed rounds (a real sale, stop-losses included; not removals) from a round on."""
+        kinds = ", ".join(f"'{k}'" for k in SALE_KINDS)
         with self._conn() as conn:
-            rows = conn.execute(f"SELECT round, net, currency FROM {self.T_TRADES} WHERE slug=? AND round>=? AND how IN ('sold', 'expired') "
+            rows = conn.execute(f"SELECT round, net, currency FROM {self.T_TRADES} WHERE slug=? AND round>=? AND how IN ({kinds}) "
                                 "ORDER BY id", (slug, from_round)).fetchall()
         return [dict(zip(("round", "net", "currency"), r)) for r in rows]
 
