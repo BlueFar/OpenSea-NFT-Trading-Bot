@@ -143,6 +143,17 @@ def target_ask(floor: Optional[float], entry: float, costs: Costs, prev_ask: Opt
     return prev_ask or round_up(be)
 
 
+def stop_loss_ask(reference: float, started_at: int, now: int, crash: bool, cfg) -> Tuple[float, float]:
+    """
+    Stop-loss listing price and its discount under the reference price: start_discount_pct, then step_pct lower
+    each step_hours (crash_step_hours in a crash) since the exit started, never more than max_discount_pct.
+    """
+    every = (cfg.crash_step_hours if crash else cfg.step_hours) * 3600.0
+    steps = int(max(0, now - started_at) // every) if every > 0 else 0
+    disc = min(cfg.max_discount_pct, cfg.start_discount_pct + cfg.step_pct * steps)
+    return round_down(reference * (1 - disc / 100.0)), disc
+
+
 def trade_result(entry: float, exit_price: float, costs: Costs) -> Dict[str, float]:
     fees = exit_price * costs.sell_cut
     net = exit_price - fees - costs.gas - entry
@@ -622,6 +633,10 @@ class PaperTrader:
                 if not complete:
                     say("problem", "More than 1,000 sales since the last check. Only the newest were read, so a "
                                    "fill or sale may have been missed.")
+                wash = _wash_keys(sales)
+                book.store.record_market_sales(slug, [
+                    (e.event_id, e.event_timestamp, per_item_price(e), e.price_currency) for e in sales
+                    if e.event_id and e.event_id not in wash and per_item_price(e)])
                 sold_now = self._judge_sales(book, p, sales, floor, costs, groups, trades, seen, say)
                 p["last_sale_check"] = now
         else:
@@ -635,21 +650,29 @@ class PaperTrader:
             ticks.append((slug, now, p["round"], "bidding", p["bid"], top, floor, None))
         elif p["status"] == "holding":
             prev = p.get("ask")
-            ask = target_ask(floor, p["entry_price"], costs, prev)
             p["floor"] = floor if floor else p.get("floor")
-            if p.get("listed_at") is None:
-                p["listed_at"] = now
-                be = break_even_ask(p["entry_price"], costs)
-                where = (f"{tm.target_sale_discount_from_floor_pct:g}% under the {fmt_price(floor, cur)} floor"
-                         if floor and ask > round_up(be) else "break-even, the floor is too low for a profit")
-                say("listed", f"Listed it for {fmt_price(ask, cur)} ({where}).")
-            elif prev and ask and abs(ask - prev) / prev >= 0.01:
-                say("repriced", f"Floor moved to {fmt_price(floor, cur)}. Listing moved from "
-                                f"{fmt_price(prev, cur)} to {fmt_price(ask, cur)}.")
-            p["ask"] = ask
-            ticks.append((slug, now, p["round"], "holding", None, None, floor, ask))
+            sold_to_offer = False
+            if sim.stop_loss.enabled and floor:
+                self._stop_loss_state(p, floor, costs, now, say)
+            if p.get("sl_state") == "exit":
+                sold_to_offer = self._stop_loss_exit(book, p, floor, costs, now, market, groups, trades, say)
+            else:
+                ask = target_ask(floor, p["entry_price"], costs, prev)
+                if p.get("listed_at") is None:
+                    p["listed_at"] = now
+                    be = break_even_ask(p["entry_price"], costs)
+                    where = (f"{tm.target_sale_discount_from_floor_pct:g}% under the {fmt_price(floor, cur)} floor"
+                             if floor and ask > round_up(be) else "break-even, the floor is too low for a profit")
+                    say("listed", f"Listed it for {fmt_price(ask, cur)} ({where}).")
+                elif prev and ask and abs(ask - prev) / prev >= 0.01:
+                    say("repriced", f"Floor moved to {fmt_price(floor, cur)}. Listing moved from "
+                                    f"{fmt_price(prev, cur)} to {fmt_price(ask, cur)}.")
+                p["ask"] = ask
+            if not sold_to_offer:
+                ticks.append((slug, now, p["round"], "holding", None, None, floor, p.get("ask")))
             limit_days = sim.max_hold_days
-            if limit_days and floor and p.get("entry_at") and now - p["entry_at"] >= limit_days * 86400:
+            if (not sold_to_offer and limit_days and floor and p.get("entry_at")
+                    and now - p["entry_at"] >= limit_days * 86400):
                 # Held too long: counted as sold just under today's floor, loss or not, so money isn't stuck
                 t = closing_trade(p, tm.target_sale_discount_from_floor_pct, now)
                 if t:
@@ -694,7 +717,8 @@ class PaperTrader:
                 if verdict == "fill":
                     p.update({"status": "holding", "entry_price": t["bid"], "entry_at": ev.event_timestamp,
                               "entry_tx": ev.transaction, "entry_token": ev.token_id, "ask": None, "listed_at": None,
-                              "entry_metrics": self._bot_metrics(slug)})
+                              "entry_metrics": self._bot_metrics(slug),
+                              "sl_state": None, "sl_since": None, "sl_started_at": None, "sl_reason": None})
                     say("filled", f"Offer filled: bought #{ev.token_id or '?'} for {fmt_price(t['bid'], cur)}. "
                                   f"A seller sold one for {fmt_price(price, cur)}, less than our offer, "
                                   f"so ours would have been taken.")
@@ -766,22 +790,99 @@ class PaperTrader:
             return "pending"
         return "fill" if kind == "offer" else "ignored"
 
+    def _stop_loss_state(self, p, floor: float, costs: Costs, now: int, say) -> None:
+        """
+        Watches a bought item whose floor fell under our break-even. "watch": selling at the usual discount under
+        the floor would lose money; after confirm_hours of that (or at once in a crash: the floor crash_pct under
+        what we paid) it becomes "exit" and we sell at a loss. Back above break-even cancels it.
+        """
+        cfg, cur = self.sim.stop_loss, p["currency"]
+        be = break_even_ask(p["entry_price"], costs)
+        under = floor * (1 - costs.exit_discount_pct / 100.0) < be
+        crash = floor <= p["entry_price"] * (1 - cfg.crash_pct / 100.0)
+        if not under:
+            if p.get("sl_state"):
+                say("recovered", f"Floor back to {fmt_price(floor, cur)}, enough for a profit again: stop-loss "
+                                 f"cancelled, listed at the usual price.")
+                p.update({"sl_state": None, "sl_since": None, "sl_started_at": None, "sl_reason": None})
+            return
+        if not p.get("sl_state"):
+            p.update({"sl_state": "watch", "sl_since": now})
+            if not crash:
+                say("watch", f"Floor {fmt_price(floor, cur)} is too low to sell at break-even "
+                             f"({fmt_price(be, cur)}). If it stays there {cfg.confirm_hours:g} hours, we sell at a loss.")
+        if p["sl_state"] == "watch" and (crash or now - (p.get("sl_since") or now) >= cfg.confirm_hours * 3600):
+            p.update({"sl_state": "exit", "sl_started_at": now, "sl_reason": "crash" if crash else "below"})
+            say("stoploss", (f"Stop-loss: the floor ({fmt_price(floor, cur)}) is {cfg.crash_pct:g}% or more under what "
+                             f"we paid ({fmt_price(p['entry_price'], cur)}), so we sell now, lowering the price every "
+                             f"{cfg.crash_step_hours:g} hours." if crash else
+                             f"Stop-loss: the floor has stayed too low for break-even for {cfg.confirm_hours:g} hours, "
+                             f"so we sell at a loss, lowering the price every {cfg.step_hours:g} hours."))
+        elif p["sl_state"] == "exit" and crash and p.get("sl_reason") != "crash":
+            p["sl_reason"] = "crash"
+            say("stoploss", f"Stop-loss: the floor fell {cfg.crash_pct:g}% or more under what we paid; lowering "
+                            f"the price every {cfg.crash_step_hours:g} hours now.")
+
+    def _stop_loss_exit(self, book: Book, p, floor: float, costs: Costs, now: int, market: "MarketView", groups,
+                        trades, say) -> bool:
+        """
+        Selling at a loss: list under the reference price (the lower of the floor and the middle price of real
+        sales in the last 24 hours), a little lower each step, and take a standing offer if it is within
+        offer_within_pct of our listing. A lower offer is a lowball: we wait for the next step. True if sold.
+        """
+        cfg, cur, slug = self.sim.stop_loss, p["currency"], p["slug"]
+        median = book.store.median_sale_price(slug, now - 86400, lambda c: same_currency(c, cur, groups))
+        ref = min(floor, median) if median else floor
+        ask, disc = stop_loss_ask(ref, p.get("sl_started_at") or now, now, p.get("sl_reason") == "crash", cfg)
+        top_offer = market.top_offer(cur, groups)
+        top = top_offer.price_value if top_offer else None
+        if top and top >= ask * (1 - cfg.offer_within_pct / 100.0):
+            r = trade_result(p["entry_price"], top, costs)
+            trades.append({
+                "slug": slug, "round": p["round"], "currency": cur,
+                "entry_price": p["entry_price"], "entry_at": p["entry_at"], "entry_tx": p["entry_tx"],
+                "entry_token": p["entry_token"], "entry_metrics": p.get("entry_metrics"),
+                "exit_price": top, "exit_at": now, "exit_tx": None, "fees": r["fees"], "gas": r["gas"],
+                "net": r["net"], "roi_pct": r["roi_pct"], "times_outbid": p.get("times_outbid") or 0,
+                "how": "stoploss_offer",
+            })
+            say("sold", f"Stop-loss sale: accepted the best offer of {fmt_price(top, cur)} (our listing was "
+                        f"{fmt_price(ask, cur)}) after {fmt_duration(now - (p['entry_at'] or now))}. "
+                        f"{'Profit' if r['net'] >= 0 else 'Loss'} {fmt_price(abs(r['net']), cur)} ({r['roi_pct']:+.0f}%) "
+                        f"after OpenSea fee, royalty and gas.")
+            p["capped_since"] = None
+            self._next_round(p, say)
+            return True
+        prev = p.get("ask")
+        if prev is None or abs(ask - prev) / max(prev, 1e-12) >= 0.005:
+            lowball = (f" The best offer ({fmt_price(top, cur)}) is more than {cfg.offer_within_pct:g}% under it, so we "
+                       f"don't take it." if top else " There is no offer to sell to.")
+            say("repriced", f"Stop-loss listing: {fmt_price(ask, cur)}, {disc:g}% under the reference "
+                            f"{fmt_price(ref, cur)} ({'middle price of the last 24 hours of sales' if median and median < floor else 'the floor'})."
+                            + lowball)
+        if p.get("listed_at") is None:
+            p["listed_at"] = now
+        p["ask"] = ask
+        return False
+
     def _sell(self, book: Book, p, ev, price, ask, costs: Costs, trades, say) -> None:
         cur = p["currency"]
         r = trade_result(p["entry_price"], ask, costs)
+        how = "stoploss" if p.get("sl_state") == "exit" else "sold"
         trades.append({
             "slug": p["slug"], "round": p["round"], "currency": cur,
             "entry_price": p["entry_price"], "entry_at": p["entry_at"], "entry_tx": p["entry_tx"],
             "entry_token": p["entry_token"], "entry_metrics": p.get("entry_metrics"),
             "exit_price": ask, "exit_at": ev.event_timestamp,
             "exit_tx": ev.transaction, "fees": r["fees"], "gas": r["gas"], "net": r["net"],
-            "roi_pct": r["roi_pct"], "times_outbid": p.get("times_outbid") or 0, "how": "sold",
+            "roi_pct": r["roi_pct"], "times_outbid": p.get("times_outbid") or 0, "how": how,
         })
         held = fmt_duration(ev.event_timestamp - (p["entry_at"] or ev.event_timestamp))
-        say("sold", f"Sold for {fmt_price(ask, cur)} after {held}: a buyer paid {fmt_price(price, cur)} for one. "
+        say("sold", f"{'Stop-loss sale: sold' if how == 'stoploss' else 'Sold'} for {fmt_price(ask, cur)} after {held}: "
+                    f"a buyer paid {fmt_price(price, cur)} for one. "
                     f"{'Profit' if r['net'] >= 0 else 'Loss'} {fmt_price(abs(r['net']), cur)} "
                     f"({r['roi_pct']:+.0f}%) after OpenSea fee, royalty and gas.")
-        if book.strategy == "B" and p.get("limit_pct") is not None:
+        if book.strategy == "B" and p.get("limit_pct") is not None and how == "sold":
             # A sale: step the limit back up towards the full margin
             b = self.sim.strategy_b
             up = min(float(self.sim.min_profit_gap_pct), float(p["limit_pct"]) + b.step_pct)
@@ -793,6 +894,7 @@ class PaperTrader:
 
     def _next_round(self, p: Dict[str, Any], say) -> None:
         """After the item is gone (sold, or held too long): leave, bid again, or stop."""
+        p.update({"sl_state": None, "sl_since": None, "sl_started_at": None, "sl_reason": None})
         if p.get("leaving"):
             say("remove", "Off the Candidates list, so it leaves the simulation now the item has sold.")
             p.update({"status": "removed", "auto_stopped": 1, "leaving": 0, "entry_price": None, "entry_at": None,

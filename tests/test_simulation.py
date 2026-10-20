@@ -1115,6 +1115,7 @@ def test_a_candidate_back_within_the_grace_period_keeps_its_offer(tmp_path):
 
 def test_an_item_held_too_long_counts_as_sold_at_todays_floor(tmp_path):
     m, t, state, t0 = _holding(tmp_path, max_hold_days=14)
+    t.sim.stop_loss.enabled = False                # the holding limit on its own (the stop-loss has its own tests)
     m.floor = 0.05                                 # under what we paid: it never sells
     t.tick(now=t0 + 13 * 86400)
     assert t.store.get_position("kongz")["status"] == "holding"
@@ -1130,6 +1131,105 @@ def test_an_item_held_too_long_counts_as_sold_at_todays_floor(tmp_path):
     assert track_record(pos, t.store.get_trades(), 5.0, t0 + 15 * 86400)["verdict"] == "losing"
     # 0 = no limit
     m2, t2, _, t1 = _holding(tmp_path / "b", max_hold_days=0)
+    t2.sim.stop_loss.enabled = False
     m2.floor = 0.05
     t2.tick(now=t1 + 100 + 30 * 86400)
     assert t2.store.get_position("kongz")["status"] == "holding"
+
+
+# ----------------------------------------------------------------------
+# Stop-loss: selling at a loss on our own when the floor falls under break-even
+# ----------------------------------------------------------------------
+def test_stop_loss_ask_steps_down_and_stops_at_the_cap():
+    from src.config.settings import StopLossConfig
+    from src.simulation.engine import stop_loss_ask
+    cfg = StopLossConfig()
+    assert stop_loss_ask(1.0, 0, 0, False, cfg) == (0.95, 5.0)
+    assert stop_loss_ask(1.0, 0, 86400 - 1, False, cfg) == (0.95, 5.0)
+    assert stop_loss_ask(1.0, 0, 86400, False, cfg) == (0.92, 8.0)
+    assert stop_loss_ask(1.0, 0, 6 * 3600, True, cfg) == (0.92, 8.0)     # a crash steps every 6 hours
+    assert stop_loss_ask(1.0, 0, 30 * 86400, False, cfg) == (0.8, 20.0)  # never more than 20% under
+
+
+def test_a_dip_under_break_even_that_recovers_cancels_the_stop_loss(tmp_path):
+    m, t, _, t0 = _holding(tmp_path)
+    m.floor = 0.062                                  # break-even is ~0.0688: no profit at the usual discount
+    t.tick(now=t0 + 600)
+    p = t.store.get_position("kongz")
+    assert p["sl_state"] == "watch" and p["ask"] > m.floor          # still listed at break-even meanwhile
+    m.floor = 0.1088
+    t.tick(now=t0 + 3600)
+    p = t.store.get_position("kongz")
+    assert p["sl_state"] is None and p["ask"] == 0.1034
+    assert "recovered" in [e["kind"] for e in t.store.get_events(5)]
+
+
+def test_after_24_hours_under_break_even_we_list_lower_each_day_and_ignore_lowballs(tmp_path):
+    m, t, _, t0 = _holding(tmp_path)
+    m.floor, m.top = 0.062, 0.03                     # 0.03 is a lowball
+    t.tick(now=t0 + 600)
+    t.tick(now=t0 + 600 + 23 * 3600)
+    assert t.store.get_position("kongz")["sl_state"] == "watch"
+    start = t0 + 600 + 24 * 3600
+    t.tick(now=start)
+    p = t.store.get_position("kongz")
+    assert p["sl_state"] == "exit" and p["sl_reason"] == "below" and p["ask"] == pytest.approx(0.0589)
+    assert t.store.get_trades() == []                # the lowball was not taken
+    t.tick(now=start + 86400)
+    assert t.store.get_position("kongz")["ask"] == pytest.approx(0.05704)   # 8% under
+    m.sale(start + 86400 + 100, 0.0575)              # a buyer takes a floor item at our price or more
+    t.tick(now=start + 86400 + 900)
+    [tr] = t.store.get_trades()
+    assert tr["how"] == "stoploss" and tr["exit_price"] == pytest.approx(0.05704) and tr["net"] < 0
+    p = t.store.get_position("kongz")
+    assert p["status"] == "bidding" and p["round"] == 2 and p["sl_state"] is None
+    from src.simulation.record import track_record
+    p["bid_seconds"] = 86400
+    rec = track_record(p, t.store.get_trades(), 5.0, start + 2 * 86400)
+    assert rec["sales"] == 1 and rec["verdict"] == "losing"
+
+
+def test_an_offer_within_10_percent_of_our_listing_is_taken(tmp_path):
+    m, t, _, t0 = _holding(tmp_path)
+    m.floor, m.top = 0.062, 0.03
+    t.tick(now=t0 + 600)
+    t.tick(now=t0 + 600 + 24 * 3600)                 # listed at 0.0589
+    m.top = 0.054                                     # 91.7% of our listing
+    t.tick(now=t0 + 700 + 24 * 3600)
+    [tr] = t.store.get_trades()
+    assert tr["how"] == "stoploss_offer" and tr["exit_price"] == 0.054 and tr["net"] < 0
+    assert t.store.get_position("kongz")["status"] == "bidding"
+
+
+def test_a_crash_sells_at_once_and_steps_every_6_hours(tmp_path):
+    m, t, _, t0 = _holding(tmp_path)
+    m.floor, m.top = 0.044, 0.01                     # 26% under the 0.05966 we paid
+    t.tick(now=t0 + 600)
+    p = t.store.get_position("kongz")
+    assert p["sl_state"] == "exit" and p["sl_reason"] == "crash" and p["ask"] == pytest.approx(0.0418)
+    t.tick(now=t0 + 600 + 6 * 3600)
+    assert t.store.get_position("kongz")["ask"] == pytest.approx(0.04048)
+    t.tick(now=t0 + 600 + 40 * 3600)
+    assert t.store.get_position("kongz")["ask"] == pytest.approx(0.0352)  # capped at 20% under
+
+
+def test_the_reference_is_the_lower_of_the_floor_and_the_days_middle_sale_price(tmp_path):
+    m, t, _, t0 = _holding(tmp_path)
+    m.floor, m.top = 0.062, 0.01
+    t.tick(now=t0 + 600)
+    for i, price in enumerate((0.050, 0.052, 0.090)):   # middle price 0.052, under the floor
+        m.sale(t0 + 700 + i, price, token=str(100 + i))
+    t.tick(now=t0 + 1200)
+    # The 0.0596 sale that filled our offer is older than a day by the time the exit starts
+    assert t.store.median_sale_price("kongz", t0 + 650, lambda c: True) == pytest.approx(0.052)
+    t.tick(now=t0 + 600 + 24 * 3600)
+    assert t.store.get_position("kongz")["ask"] == pytest.approx(0.0494)  # 5% under 0.052, not under the floor
+    assert t.store.median_sale_price("kongz", t0, lambda c: c == "APE") is None
+
+
+def test_stop_loss_settings_are_in_the_config_file():
+    raw = yaml.safe_load(open("config/config.yaml", encoding="utf-8"))["simulation"]
+    assert raw["max_hold_days"] == 0
+    assert raw["stop_loss"] == {"enabled": True, "confirm_hours": 24, "crash_pct": 25, "start_discount_pct": 5,
+                                "step_pct": 3, "step_hours": 24, "crash_step_hours": 6, "max_discount_pct": 20,
+                                "offer_within_pct": 10}

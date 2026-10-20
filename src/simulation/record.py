@@ -18,6 +18,8 @@ SLOW_DAYS = 14.0
 UNDERWATER_DAYS = 3.0
 VERDICT_ORDER = {"proven": 0, "not_yet": 1, "slow": 2, "losing": 3}
 DAY = 86400.0
+# Trades where a real buyer or offer took the item (a stop-loss sale is a sale at a loss)
+SALES = ("sold", "stoploss", "stoploss_offer")
 
 
 def _mean(xs: List[float]) -> Optional[float]:
@@ -32,7 +34,7 @@ def track_record(pos: Dict[str, Any], trades: List[Dict[str, Any]], exit_discoun
     """
     d = describe_position(pos, exit_discount_pct)
     cur = pos.get("currency") or (trades[0].get("currency") if trades else None)
-    sold = [t for t in trades if t.get("how") == "sold"]
+    sold = [t for t in trades if t.get("how") in SALES]
     holding = pos.get("entry_price") is not None and pos.get("status") != "removed"
     fills = len(trades) + (1 if holding else 0)
     bid_days = (pos.get("bid_seconds") or 0.0) / DAY

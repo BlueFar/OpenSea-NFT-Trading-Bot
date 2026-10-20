@@ -791,6 +791,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             "strategy_b": sim.strategy_b.model_dump(),
             "candidate_grace_hours": sim.candidate_grace_hours,
             "max_hold_days": sim.max_hold_days,
+            "stop_loss": sim.stop_loss.model_dump(),
             "min_profit_gap_pct": sim.min_profit_gap_pct,
             "outbid_step_pct": sim.outbid_step_pct,
             "repeat": sim.repeat,

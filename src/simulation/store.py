@@ -14,13 +14,17 @@ POSITION_COLUMNS = (
     "source", "auto_stopped", "leaving", "trial_round", "trial_state", "trial_started_at",
     "last_outbid_at", "missed_fills", "missed_above_limit", "limit_pct", "capped_since",
     "bid_seconds", "entry_metrics", "dropped_at",
+    "sl_state", "sl_since", "sl_started_at", "sl_reason",
 )
 # Added after the first release: (column, type) brought into older databases
 LATER_COLUMNS = (("leaving", "INTEGER DEFAULT 0"), ("trial_round", "INTEGER"), ("trial_state", "TEXT"),
                  ("trial_started_at", "INTEGER"), ("last_outbid_at", "INTEGER"),
                  ("missed_fills", "INTEGER DEFAULT 0"), ("missed_above_limit", "INTEGER DEFAULT 0"),
                  ("limit_pct", "REAL"), ("capped_since", "INTEGER"),
-                 ("bid_seconds", "REAL DEFAULT 0"), ("entry_metrics", "TEXT"), ("dropped_at", "INTEGER"))
+                 ("bid_seconds", "REAL DEFAULT 0"), ("entry_metrics", "TEXT"), ("dropped_at", "INTEGER"),
+                 # Stop-loss: "watch" (floor under break-even since sl_since) or "exit" (selling at a loss since
+                 # sl_started_at); sl_reason "below" (24 hours under break-even) or "crash"
+                 ("sl_state", "TEXT"), ("sl_since", "INTEGER"), ("sl_started_at", "INTEGER"), ("sl_reason", "TEXT"))
 # Longest gap between two checks counted as time spent bidding (the bot may have been off)
 MAX_CHECK_GAP_SECONDS = 3600
 # Strategy A (the rules shown on the dashboard) keeps the original sim_ tables; strategy B, a second set of
@@ -116,6 +120,13 @@ class SimStore:
             c.execute(f"""
                 CREATE TABLE IF NOT EXISTS {self.T_SEEN} (
                     slug TEXT, event_id TEXT, ts INTEGER,
+                    PRIMARY KEY (slug, event_id)
+                )
+            """)
+            # Real sale prices seen at each check, shared by both strategies: the stop-loss's 24-hour middle price
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS sim_market_sales (
+                    slug TEXT, event_id TEXT, ts INTEGER, price REAL, currency TEXT,
                     PRIMARY KEY (slug, event_id)
                 )
             """)
@@ -347,6 +358,28 @@ class SimStore:
         with self._conn() as conn:
             rows = conn.execute(q + " ORDER BY ts", args).fetchall()
         return [dict(zip(("ts", "round", "phase", "bid", "competitor_top", "floor", "ask"), r)) for r in rows]
+
+    def record_market_sales(self, slug: str, rows: Iterable[tuple]) -> None:
+        """rows: (event_id, ts, price per item, currency). Kept 3 days."""
+        rows = list(rows)
+        if not rows:
+            return
+        with self._conn() as conn:
+            conn.executemany("INSERT OR IGNORE INTO sim_market_sales (slug, event_id, ts, price, currency) "
+                             "VALUES (?, ?, ?, ?, ?)", [(slug, *r) for r in rows])
+            conn.execute("DELETE FROM sim_market_sales WHERE ts < ?", (int(time.time()) - 3 * 86400,))
+            conn.commit()
+
+    def median_sale_price(self, slug: str, since_ts: int, accept) -> Optional[float]:
+        """Middle price of the real sales of a collection since since_ts; accept(currency) picks the coins."""
+        with self._conn() as conn:
+            prices = sorted(r[0] for r in conn.execute(
+                "SELECT price, currency FROM sim_market_sales WHERE slug=? AND ts>=? AND price>0",
+                (slug, since_ts)) if accept(r[1]))
+        if not prices:
+            return None
+        mid = len(prices) // 2
+        return prices[mid] if len(prices) % 2 else (prices[mid - 1] + prices[mid]) / 2.0
 
     def seen_sales(self, slug: str, event_ids: Iterable[str]) -> set:
         ids = [e for e in dict.fromkeys(event_ids) if e]

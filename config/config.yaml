@@ -130,8 +130,19 @@ simulation:
   candidate_grace_hours: 24         # ...but keeps its offer this long first, in case it passes again (most
                                     # come back within a day). Losing the blue tick, a listings jump or a big
                                     # 1-day floor drop removes it at once.
-  max_hold_days: 14                 # A bought item still unsold after this long counts as sold just under
-                                    # today's floor, loss or not, so money isn't stuck (0 = no limit)
+  max_hold_days: 0                  # A bought item still unsold after this long counts as sold just under
+                                    # today's floor, loss or not (0 = no limit; the stop-loss handles falling floors)
+  stop_loss:                        # When the floor falls under our break-even, sell at a loss on our own:
+    enabled: true
+    confirm_hours: 24               # floor under break-even this long first (a dip that recovers cancels it)...
+    crash_pct: 25                   # ...or at once when the floor is this far under what we paid
+    start_discount_pct: 5           # list this far under the reference price (the lower of the floor and the
+                                    # middle price of real sales in the last 24 hours)...
+    step_pct: 3                     # ...then this much lower each step...
+    step_hours: 24                  # ...a step each day unsold...
+    crash_step_hours: 6             # ...or every 6 hours in a crash...
+    max_discount_pct: 20            # ...but never more than this under the reference price
+    offer_within_pct: 10            # take a standing offer if it is at most this far under our listing
   min_profit_gap_pct: 40.0          # Stop outbidding below this spread; hold at the limit instead
   outbid_step_pct: 0.1              # Beat the best offer by this much, rounded up to 4 significant digits
   repeat: true                      # After a sale, place a new offer and go again

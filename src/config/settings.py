@@ -142,6 +142,19 @@ class StrategyBConfig(BaseModel):
     lowest_gap_pct: float = Field(25.0, ge=0)   # Never below this; after a sale it steps back up by step_pct
 
 
+class StopLossConfig(BaseModel):
+    """Selling a bought item at a loss when its floor has fallen under our break-even (no one is asked)."""
+    enabled: bool = True
+    confirm_hours: float = Field(24.0, ge=0)        # Floor under break-even this long before selling at a loss...
+    crash_pct: float = Field(25.0, gt=0)            # ...or straight away once the floor is this far under our cost
+    start_discount_pct: float = Field(5.0, ge=0)    # First listing: this far under the reference price
+    step_pct: float = Field(3.0, ge=0)              # Then this much lower...
+    step_hours: float = Field(24.0, gt=0)           # ...each time this passes unsold
+    crash_step_hours: float = Field(6.0, gt=0)      # (this often in a crash)
+    max_discount_pct: float = Field(20.0, ge=0)     # Never more than this under the reference price
+    offer_within_pct: float = Field(10.0, ge=0)     # Take a standing offer at most this far under our listing
+
+
 class SimulationConfig(BaseModel):
     """Paper trading: hold the best offer on these collections and sell what fills just under the floor."""
     enabled: bool = True
@@ -157,8 +170,9 @@ class SimulationConfig(BaseModel):
     repeat: bool = True                                  # After selling, place a new offer
     strategy_b: StrategyBConfig = Field(default_factory=StrategyBConfig)
     candidate_grace_hours: float = Field(24.0, ge=0)     # A candidate that stops passing keeps its offer this long
-    max_hold_days: float = Field(14.0, ge=0)             # A bought item unsold after this long counts as sold at
+    max_hold_days: float = Field(0.0, ge=0)              # A bought item unsold after this long counts as sold at
                                                          # today's floor, loss or not (0 = wait for a real sale)
+    stop_loss: StopLossConfig = Field(default_factory=StopLossConfig)
 
 class BotConfig(BaseModel):
     general: GeneralConfig = Field(default_factory=GeneralConfig)
