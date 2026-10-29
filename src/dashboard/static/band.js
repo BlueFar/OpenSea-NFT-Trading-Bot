@@ -6,9 +6,10 @@
   var esc = N.esc, isNum = N.isNum, fmt = N.fmt, money = N.money;
   function $(id) { return document.getElementById(id); }
 
+  function dollars(n) { return n === 0 ? "$0" : N.usd(n); }
   function signedUsd(n) {
     if (!isNum(n)) return "–";
-    return (n > 0 ? "+" : n < 0 ? "−" : "") + N.usd(Math.abs(n)).replace("−", "");
+    return (n > 0 ? "+" : n < 0 ? "−" : "") + dollars(Math.abs(n)).replace("−", "");
   }
   function cls(n) { return !isNum(n) ? "" : n < 0 ? "c-bad" : n > 0 ? "c-good" : ""; }
   function osLink(slug, text) {
@@ -126,16 +127,38 @@
   function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
   function when(words) { return words ? " " + words : ""; }
 
+  // Counts like the Simulation page's: best offer held, offers filled, sold
+  function counts(d, fromTop, fromFill, fromSold) {
+    var bids = d.bids.filter(function (b) { return within(b.placed_at, fromTop); });
+    var held = d.held.filter(function (h) { return within(h.entry_at, fromFill); });
+    var filledSales = d.trades.filter(function (t) { return within(t.entry_at, fromFill); });
+    return {
+      bidding: bids.length,
+      onTop: bids.filter(function (b) { return b.bid_state === "top" || b.bid_state === "alone"; }).length,
+      filled: held.length + filledSales.length, waiting: held.length,
+      sold: d.trades.filter(function (t) { return within(t.exit_at, fromSold); }).length,
+      under: d.held.filter(function (h) { return isNum(h.net_usd) && h.net_usd < 0; }).length
+    };
+  }
+
   function renderMoney(panel) {
     var d = panels[panel]; if (!d || !$(panel)) return;
     function k(box) { return panel + ":" + box; }
+    var ct = counts(d, since(k("top")), null, null), cf = counts(d, null, since(k("filled")), null), cs = counts(d, null, null, since(k("sold")));
+    var countBoxes =
+      stat(panel, "top", "Best offer held", String(ct.onTop), "of " + plural(ct.bidding, "collection", "collections") + " bidding" + when(periodWords(k("top")) ? "(offers placed " + periodWords(k("top")) + ")" : ""), "",
+        "Open offers that are the best offer on their collection right now") +
+      stat(panel, "filled", "Offers filled", String(cf.filled), cf.waiting + " waiting to sell" + when(periodWords(k("filled")) ? "(bought " + periodWords(k("filled")) + ")" : ""), "",
+        "Items bought: still held, plus those already sold") +
+      stat(panel, "sold", "Sold", String(cs.sold), (cs.under ? plural(cs.under, "item", "items") + " held below break-even" : "No item held below break-even") +
+        when(periodWords(k("sold")) ? "(sales " + periodWords(k("sold")) + ")" : ""), "", "Completed sales, stop-losses included");
     var a = sums(d, since(k("offers"))), h = sums(d, since(k("held"))), w = sums(d, since(k("win"))), r = sums(d, since(k("realised"))),
         t = sums(d, since(k("tied"))), o = sums(d, since(k("total")));
     var tied = t.realised - t.cost - t.offers, total = o.realised + (o.value - o.cost);
-    $(panel).innerHTML =
-      stat(panel, "offers", "In open offers", N.usd(a.offers), plural(a.nOffers, "offer", "offers") + " placed" + when(periodWords(k("offers"))) + ", " + a.onTop +
+    $(panel).innerHTML = countBoxes +
+      stat(panel, "offers", "In open offers", dollars(a.offers), plural(a.nOffers, "offer", "offers") + " placed" + when(periodWords(k("offers"))) + ", " + a.onTop +
         " the best offer. If every offer filled at once, the wallet would need this much.", "", "Our offers waiting to be taken, at today's coin prices") +
-      stat(panel, "held", "In held items", N.usd(h.cost), plural(h.nHeld, "item", "items") + " bought" + when(periodWords(k("held"))) + " and still held, worth " + N.usd(h.value) + " today" +
+      stat(panel, "held", "In held items", dollars(h.cost), plural(h.nHeld, "item", "items") + " bought" + when(periodWords(k("held"))) + " and still held, worth " + dollars(h.value) + " today" +
         (h.unvalued ? " (" + h.unvalued + " with no price yet)" : ""), "", "What we paid. Today's worth is the lower of the last real sale and our usual price under the floor, after fees and gas") +
       stat(panel, "win", "Profit from winning sales", signedUsd(w.win), plural(w.nWin, "profitable sale", "profitable sales") + when(periodWords(k("win"))) + ", after OpenSea fee, royalty and gas", cls(w.win)) +
       stat(panel, "realised", "Profit after losses", signedUsd(r.realised), (r.nLoss ? signedUsd(r.loss) + " from " + plural(r.nLoss, "losing sale", "losing sales") : "No losing sales") +
@@ -194,7 +217,7 @@
     $("bandBids").innerHTML = bids.length ? '<div class="tbl-scroll"><table class="tbl sim-trades band-tbl"><thead><tr><th>Collection</th><th>Our offer</th><th>Best other</th><th>Floor</th><th title="Days our offer has been up">Bidding</th><th>Outbid</th><th>Ready</th><th></th></tr></thead><tbody>' +
       bids.map(function (r) {
         var st = r.bid_state === "top" || r.bid_state === "alone" ? '<span class="c-good">best offer</span>' : r.bid_state === "capped" ? '<span class="c-warn">at our limit</span>' : "";
-        return "<tr>" + nameCell(r, st) + '<td data-l="Our offer"><strong>' + N.usd(r.bid_usd) + '</strong><div class="sub">' + price(r.bid, r.currency) + "</div></td>" +
+        return "<tr>" + nameCell(r, st) + '<td data-l="Our offer"><strong>' + dollars(r.bid_usd) + '</strong><div class="sub">' + price(r.bid, r.currency) + "</div></td>" +
           '<td data-l="Best other">' + (isNum(r.competitor_top) ? price(r.competitor_top, r.currency) : '<span class="muted">none</span>') + "</td>" +
           '<td data-l="Floor">' + price(r.floor, r.currency) + "</td>" + '<td data-l="Bidding">' + days(r.bid_days) + "</td>" +
           '<td data-l="Outbid">' + fmt(r.times_outbid, 0) + "</td>" + '<td data-l="Ready">' + readyBox(readyOf(r.slug)) + "</td>" +
@@ -206,10 +229,10 @@
       held.map(function (r) {
         var stage = r.stop_loss_at ? '<span class="c-bad">stop-loss, step ' + (r.sl_steps + 1) + "</span>" : r.under_since ? '<span class="c-warn">under break-even since ' + esc(N.fmtDay(r.under_since)) + "</span>" : isNum(r.ask) ? "listed at " + price(r.ask, r.currency) : "";
         var basis = r.value_basis === "last_sale" ? "at the last sale" : r.value_basis === "stop_loss" ? "at our stop-loss listing" : "under today's floor";
-        return "<tr>" + nameCell(r, stage) + '<td data-l="Paid"><strong>' + N.usd(r.cost_usd) + '</strong><div class="sub">' + price(r.entry_price, r.currency) + "</div></td>" +
+        return "<tr>" + nameCell(r, stage) + '<td data-l="Paid"><strong>' + dollars(r.cost_usd) + '</strong><div class="sub">' + price(r.entry_price, r.currency) + "</div></td>" +
           '<td data-l="Held">' + days(r.days_held) + (r.long_hold ? ' <span class="pill warn">long hold</span>' : "") + "</td>" +
           '<td data-l="Break-even">' + price(r.break_even, r.currency) + "</td>" +
-          '<td data-l="Worth today">' + N.usd(r.value_usd) + '<div class="sub">' + esc(basis) + "</div></td>" +
+          '<td data-l="Worth today">' + dollars(r.value_usd) + '<div class="sub">' + esc(basis) + "</div></td>" +
           '<td data-l="Profit or loss" class="' + cls(r.net_usd) + '">' + signedUsd(r.net_usd) + "</td>" +
           '<td data-l="">' + buyButton(r.slug, r.on_buy_list) + "</td></tr>";
       }).join("") + "</tbody></table></div>" : '<p class="chart-note">Nothing held in this range.</p>';
@@ -219,7 +242,7 @@
       trades.map(function (t) {
         var how = t.how === "stoploss" ? "stop-loss, a buyer took our listing" : t.how === "stoploss_offer" ? "stop-loss, took the best offer" : "";
         return "<tr>" + nameCell(t, esc(N.fmtDay(t.exit_at)) + (how ? " · " + esc(how) : "")) +
-          '<td data-l="Paid"><strong>' + N.usd(t.cost_usd) + '</strong><div class="sub">' + price(t.entry_price, t.currency) + "</div></td>" +
+          '<td data-l="Paid"><strong>' + dollars(t.cost_usd) + '</strong><div class="sub">' + price(t.entry_price, t.currency) + "</div></td>" +
           '<td data-l="Sold">' + price(t.exit_price, t.currency) + "</td>" + '<td data-l="Held">' + days(t.days_held) + "</td>" +
           '<td data-l="Profit" class="' + cls(t.net_usd) + '">' + signedUsd(t.net_usd) + (isNum(t.roi_pct) ? ' <small>' + (t.roi_pct >= 0 ? "+" : "") + fmt(t.roi_pct, 0) + "%</small>" : "") + "</td></tr>";
       }).join("") + "</tbody></table></div>" : '<p class="chart-note">No sales in this range yet.</p>';
@@ -264,8 +287,8 @@
   function buyRow(it) {
     var cur = it.currency || "", s = it.suggest || {};
     var now = !s.action ? "Not in the simulation right now, so there's nothing to copy" :
-      s.action === "offer" ? "Right now the bot would offer " + N.moneyText(s.price, cur) + (isNum(s.usd) ? " (" + N.usd(s.usd) + ")" : "") :
-      "Holding the simulation's item: the bot would list it at " + N.moneyText(s.price, cur) + (isNum(s.usd) ? " (" + N.usd(s.usd) + ")" : "");
+      s.action === "offer" ? "Right now the bot would offer " + N.moneyText(s.price, cur) + (isNum(s.usd) ? " (" + dollars(s.usd) + ")" : "") :
+      "Holding the simulation's item: the bot would list it at " + N.moneyText(s.price, cur) + (isNum(s.usd) ? " (" + dollars(s.usd) + ")" : "");
     var rec = it.rounds ? it.rounds + (it.rounds === 1 ? " round" : " rounds") + ", " + it.wins + " profitable, " + (isNum(it.realised_usd) ? signedUsd(it.realised_usd) : N.moneyText(it.realised, cur)) : "No completed round yet";
     if (isNum(it.sales_7d)) rec += " · " + it.sales_7d + (it.sales_7d === 1 ? " sale" : " sales") + " in 7 days";
     var warns = (it.warnings || []).map(function (w) { return '<p class="buy-warn c-' + (w.level === "bad" ? "bad" : "warn") + '">' + esc(w.text) + "</p>"; }).join("");
