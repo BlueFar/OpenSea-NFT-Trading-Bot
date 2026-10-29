@@ -35,9 +35,17 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5"/><path d="M4 19h16"/><path d="M7 15l3-4 3 2 5-6"/><circle cx="18" cy="7" r="1.6"/></svg>
         Simulation
       </button>
+      <button data-page="band">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18"/><path d="M16.5 7.5c0-1.7-2-3-4.5-3s-4.5 1.3-4.5 3 2 2.6 4.5 3.1 4.5 1.5 4.5 3.4-2 3-4.5 3-4.5-1.3-4.5-3"/></svg>
+        $50–$500
+      </button>
       <button data-page="final">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/></svg>
         Final list
+      </button>
+      <button data-page="buy">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4h2l2.4 11.2a2 2 0 0 0 2 1.6h7.7a2 2 0 0 0 2-1.5L21 8H6"/><circle cx="10" cy="20" r="1.3"/><circle cx="17" cy="20" r="1.3"/></svg>
+        Buy List
       </button>
       <button data-page="check">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
@@ -167,6 +175,35 @@
       </div>
     </section>
 
+    <!-- $50–$500 -->
+    <section class="page" id="page-band" aria-labelledby="h-band">
+      <div class="page-head">
+        <div>
+          <h1 id="h-band">$50–$500</h1>
+          <p id="bandSub">The Simulation's collections where our offer, or what we paid, is $50–$500.</p>
+        </div>
+      </div>
+      <div class="chips band-filters" role="group" aria-label="Filters" id="bandFilters"></div>
+      <div id="bandBanner"></div>
+      <div class="stats band-money" id="bandMoney"><div class="loading">Loading…</div></div>
+      <div class="card panel sim-stack">
+        <div class="section-title"><h2>Open offers</h2><span id="bandBidsSub"></span></div>
+        <div id="bandBids"></div>
+      </div>
+      <div class="card panel sim-stack">
+        <div class="section-title"><h2>Held items</h2><span id="bandHeldSub"></span></div>
+        <div id="bandHeld"></div>
+      </div>
+      <div class="card panel sim-stack">
+        <div class="section-title"><h2>Scorecard</h2><span id="bandScoreSub"></span></div>
+        <div id="bandScore"></div>
+      </div>
+      <div class="card panel sim-stack">
+        <div class="section-title"><h2>Completed sales</h2><span id="bandTradesSub"></span></div>
+        <div id="bandTrades"></div>
+      </div>
+    </section>
+
     <!-- FINAL LIST -->
     <section class="page" id="page-final" aria-labelledby="h-final">
       <div class="page-head">
@@ -183,6 +220,24 @@
         <button class="btn primary" type="submit">Add</button>
       </form>
       <p class="chart-note" style="margin:0">Ask Claude in the project chat to check a collection's fundamentals and add it here.</p>
+    </section>
+
+    <!-- BUY LIST -->
+    <section class="page" id="page-buy" aria-labelledby="h-buy">
+      <div class="page-head">
+        <div>
+          <h1 id="h-buy">Buy List</h1>
+          <p>The collections the trading bot will buy and sell once it's built. You choose what goes here; the ready checklist beside each one is a guide, not a gate.</p>
+        </div>
+      </div>
+      <div class="card buy-top" id="buyTop"></div>
+      <div class="fin-list" id="buyList"><div class="loading">Loading…</div></div>
+      <form class="card search fin-add" id="buyAddForm" autocomplete="off">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        <input id="buyAddInput" type="text" placeholder="Add a collection: OpenSea link or collection name" aria-label="OpenSea link or collection name to add">
+        <input id="buyAddNote" type="text" placeholder="Why (optional)" aria-label="Why you're adding it (optional)" class="fin-note-in">
+        <button class="btn primary" type="submit">Add</button>
+      </form>
     </section>
 
     <!-- CHECK -->
@@ -242,5 +297,6 @@
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script src="/static/app.js"></script>
 <script src="/static/sim.js"></script>
+<script src="/static/band.js"></script>
 </body>
 </html>

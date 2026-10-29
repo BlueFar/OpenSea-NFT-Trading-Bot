@@ -200,6 +200,7 @@
       ? '<button class="btn" type="button" data-act="start" data-slug="' + esc(p.slug) + '">Start</button>'
       : '<button class="btn ghost" type="button" data-act="stop" data-slug="' + esc(p.slug) + '">Stop</button>') +
       '<button class="btn ghost" type="button" data-act="remove" data-slug="' + esc(p.slug) + '" data-name="' + esc(p.name || p.slug) + '">Remove</button>';
+    if (window.BuyList) btns = window.BuyList.button(p.slug, (data.buy_list || []).indexOf(p.slug) >= 0) + btns;
     return '<div class="card sim-card">' +
       '<div class="sim-head">' + N.art(p.slug, p.image) + '<div style="min-width:0;flex:1"><div class="cand-name"><span>' + osLink(p.slug, p.name || p.slug) + "</span></div>" +
       '<div class="cand-meta">' + esc(meta.filter(Boolean).join(" · ")) + "</div></div>" + statusPill(p) + "</div>" +
@@ -425,6 +426,7 @@
       '<div class="fin-side">' + (f.status ? statusPill(f) : '<span class="pill neutral">Not simulated</span>') +
       finProfit(withB ? "Strategy A profit" : "Simulation profit", f, cur) +
       (withB ? finProfit(bTag() + "Strategy B profit (" + fmt(limitOf(f.b, finData.min_profit_gap_pct), 0) + "% limit)", f.b, cur) : "") +
+      (window.BuyList ? window.BuyList.button(f.slug, (finData.buy_list || []).indexOf(f.slug) >= 0) : "") +
       '<button class="btn ghost" type="button" data-fin-remove="' + esc(f.slug) + '" data-name="' + esc(f.name || f.slug) + '">Remove</button></div></div>';
   }
   function loadFinal() {

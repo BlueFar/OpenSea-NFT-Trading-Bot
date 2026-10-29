@@ -174,6 +174,24 @@ class SimulationConfig(BaseModel):
     candidate_grace_hours: float = Field(24.0, ge=0)     # A candidate that stops passing keeps its offer this long
     exit: ExitConfig = Field(default_factory=ExitConfig)
 
+class BuyReadyConfig(BaseModel):
+    """When a collection counts as ready for the Buy List (shown as a checklist; adding is always up to the owner)."""
+    min_rounds: int = Field(2, ge=1)                # At least this many bought-and-sold rounds, all profitable...
+    alt_bid_days: float = Field(14.0, ge=0)         # ...or this many days of bidding with 1 profitable round
+    min_sales_7d: int = Field(5, ge=0)              # Real buyers to sell to: sales in the last 7 days
+    risky_chains: List[str] = Field(default_factory=lambda: ["abstract"])  # Chains shutting down or at risk
+    risky_collections: Dict[str, str] = Field(default_factory=dict)        # slug -> why (e.g. its game's chain)
+
+
+class BuyListConfig(BaseModel):
+    """The $50-$500 view of the simulation, and the Buy List the trading bot (not built yet) will trade from."""
+    band_min_usd: float = Field(50.0, ge=0)         # Our offer (or what we paid) at least this many dollars...
+    band_max_usd: float = Field(500.0, gt=0)        # ...and at most this many
+    long_hold_days: float = Field(21.0, gt=0)       # A held item gets a "long hold" badge after this long
+    floor_drop_warn_pct: float = Field(20.0, gt=0)  # Buy List warning: floor this much under the floor when added
+    ready: BuyReadyConfig = Field(default_factory=BuyReadyConfig)
+
+
 class BotConfig(BaseModel):
     general: GeneralConfig = Field(default_factory=GeneralConfig)
     discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
@@ -183,6 +201,7 @@ class BotConfig(BaseModel):
     floor_history: FloorHistoryConfig = Field(default_factory=FloorHistoryConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     simulation: SimulationConfig = Field(default_factory=SimulationConfig)
+    buy_list: BuyListConfig = Field(default_factory=BuyListConfig)
     opensea_api_key: Optional[str] = None
 
 def overrides_path_for(config_path: str) -> str:

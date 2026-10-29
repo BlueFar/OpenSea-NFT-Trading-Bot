@@ -515,3 +515,30 @@ h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
   .fin-side { grid-column: 1 / -1; justify-items: start; text-align: left; }
 }
 .fin-trial { margin: 4px 0 0; font-size: 13px; font-weight: 500; }
+
+/* $50–$500 page and Buy List */
+.band-money { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.band-filters { align-items: center; }
+.chip-gap { width: 10px; }
+.band-name { display: flex; gap: 10px; align-items: center; min-width: 180px; }
+.band-name .art { width: 32px; height: 32px; flex: none; }
+.band-tbl td { vertical-align: middle; }
+.band-tbl td .sub { white-space: nowrap; }
+.band-tbl td:first-child .sub { white-space: normal; }
+.ready summary { list-style: none; cursor: pointer; display: inline-block; }
+.ready summary::-webkit-details-marker { display: none; }
+.ready-list { list-style: none; margin: 8px 0 0; padding: 10px 12px; display: grid; gap: 5px; text-align: left; white-space: normal;
+  font-size: 12.5px; font-weight: 400; background: color-mix(in srgb, var(--fg) 4%, var(--surface)); border-radius: 8px; min-width: 260px; }
+.ready-list li { display: grid; grid-template-columns: 16px 1fr; gap: 6px; }
+.rk { font-weight: 700; } .rk.ok { color: var(--good); } .rk.no { color: var(--bad); } .rk.unk { color: var(--muted); }
+.buy-add { padding: 5px 10px; font-size: 12.5px; white-space: nowrap; }
+.on-buy { font-size: 11.5px; }
+.buy-top { display: flex; gap: 16px; align-items: center; justify-content: space-between; padding: 16px 18px; flex-wrap: wrap; }
+.buy-top-text { display: grid; gap: 4px; max-width: 640px; font-size: 13px; }
+.buy-row.warn { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.buy-row.bad { border-color: color-mix(in srgb, var(--bad) 50%, var(--line)); }
+.buy-warn { margin: 4px 0 0; font-size: 13px; font-weight: 500; }
+.buy-settings { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+.buy-ready { margin-top: 8px; }
+@media (max-width: 980px) { .band-money { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .band-money { grid-template-columns: minmax(0, 1fr); } .ready-list { min-width: 0; } }

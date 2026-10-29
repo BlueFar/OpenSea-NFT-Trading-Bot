@@ -150,3 +150,18 @@ simulation:
     step_pct: 5.0                   # Lower the limit by this many points at a time...
     every_hours: 24.0               # ...after this long held at the limit with no fill
     lowest_gap_pct: 25.0            # Never below this. After a sale it steps back up by step_pct.
+
+# $50–$500 page and Buy List. The Buy List is what the trading bot (not built yet) will trade: only rows that
+# are switched on, and only while "Pause all" is off. Nothing here places an order.
+buy_list:
+  band_min_usd: 50                  # The $50–$500 page shows collections whose offer (or price paid) is
+  band_max_usd: 500                 # between these dollar amounts, at the coin price when it was bought
+  long_hold_days: 21                # Held this long: a "long hold" badge (information only, never a rule)
+  floor_drop_warn_pct: 20           # Buy List warning when the floor is this far under the floor when added
+  ready:                            # The "ready" checklist shown beside each collection
+    min_rounds: 2                   # At least this many bought-and-sold rounds, all profitable...
+    alt_bid_days: 14                # ...or this many days of bidding with 1 profitable round
+    min_sales_7d: 5                 # At least this many sales in the last 7 days (buyers to sell to)
+    risky_chains: [abstract]        # Chains shutting down or at risk (Abstract closes 15 Dec 2026)
+    risky_collections:              # Collections with a known risk the chain doesn't show: slug -> why
+      och-genesis-ring: "its game runs on Abstract, which shuts down 15 Dec 2026"

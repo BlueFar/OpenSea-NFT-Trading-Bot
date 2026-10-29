@@ -17,12 +17,14 @@ from ..collectors.orchestrator import CollectionEvaluator
 from ..collectors.chain_volume import summarize as summarize_chain_volume
 from ..runtime import control, launchd
 from ..simulation.engine import check_interval, closing_trade, describe_position
+from ..simulation.buylist import (BuyListStore, bot_settings, build_band, buy_warnings, entry_key, held_value,
+                                  market_facts, readiness)
 from ..simulation.record import track_record
 from ..simulation.store import SimStore
 from ..runtime.control import BotProcessManager, PID_FILE, LOG_FILE, WORKSPACE_ROOT  # noqa: F401 (re-exported)
 from ..utils.logging import setup_logger
 from ..utils.net import use_ipv4_only
-from ..utils.prices import PriceBook, WRAPPED_TO_NATIVE
+from ..utils.prices import PriceBook, WRAPPED_TO_NATIVE, usd_rate
 from ..utils.time import now_local
 
 logger = setup_logger("dashboard_server")
@@ -34,6 +36,7 @@ STATIC_FILES = {
     "/static/app.css": ("app.css", "text/css; charset=utf-8"),
     "/static/app.js": ("app.js", "application/javascript; charset=utf-8"),
     "/static/sim.js": ("sim.js", "application/javascript; charset=utf-8"),
+    "/static/band.js": ("band.js", "application/javascript; charset=utf-8"),
 }
 
 # Rule key -> (config attribute holding the limit, or None for yes/no rules)
@@ -186,6 +189,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             "/api/chains": lambda: self._handle_get_chains(),
             "/api/simulation": lambda: self._handle_get_simulation(),
             "/api/final": lambda: self._handle_get_final(),
+            "/api/band": lambda: self._handle_get_band(),
+            "/api/buylist": lambda: self._handle_get_buylist(),
         }
         if path in routes:
             routes[path]()
@@ -209,6 +214,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             self._handle_simulation_action(path.rsplit("/", 1)[-1])
         elif path.startswith("/api/final/"):
             self._handle_final_action(path.rsplit("/", 1)[-1])
+        elif path.startswith("/api/buylist/"):
+            self._handle_buylist_action(path.rsplit("/", 1)[-1])
         else:
             self._send_text("Not Found", status=404)
 
@@ -785,6 +792,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             "enabled": sim.enabled,
             "include_candidates": sim.include_candidates,
             "final": [f["slug"] for f in store.get_final_list()],
+            "buy_list": self._buy_store().slugs(),
             "interval_seconds": sim.interval_seconds,
             "contested_interval_seconds": min(sim.interval_seconds, sim.contested_interval_seconds),
             "quiet_interval_seconds": max(sim.interval_seconds, sim.quiet_interval_seconds),
@@ -877,7 +885,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 "record": track_record(pos, trades, discount, now) if pos else None,
                 "b": self._final_b(positions_b.get(f["slug"]), trades_b.get(f["slug"], []), discount, now) if b_on else None,
             })
-        self._send_json({"items": items, "interval_seconds": cfg.simulation.interval_seconds,
+        self._send_json({"items": items, "buy_list": self._buy_store().slugs(),
+                         "interval_seconds": cfg.simulation.interval_seconds,
                          "min_profit_gap_pct": cfg.simulation.min_profit_gap_pct, "strategy_b": b_on})
 
     @staticmethod
@@ -983,6 +992,158 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         if pos_b is not None and pos_b["status"] != "removed":
             store_b.set_status(slug, action, closing_trade=closing_for(pos_b))  # both strategies follow the button
         self._send_json({"success": True, "position": result})
+
+    # ------------------------------------------------------------------
+    # $50-$500 page and Buy List
+    # ------------------------------------------------------------------
+    def _buy_store(self) -> BuyListStore:
+        store = getattr(type(self), "buy_store", None)
+        if store is None or store.db_path != self.state_store.db_path:
+            store = type(self).buy_store = BuyListStore(self.state_store.db_path)
+        return store
+
+    def _rate_now(self):
+        """currency -> today's dollar rate (or None), from the same prices as the dashboard's dollar hovers."""
+        book = getattr(type(self), "price_book", None)
+        if book is None:
+            book = type(self).price_book = PriceBook(self.state_store)
+        prices = {k: v["usd"] for k, v in book.prices().items() if isinstance(v.get("usd"), (int, float))}
+        return lambda cur: usd_rate(cur, prices)
+
+    def _fixed_rates(self, positions, trades, rate_now) -> Dict[str, float]:
+        """Dollar rate at about the time each item was bought (saved the first time it is seen)."""
+        pairs = [(entry_key("A", p["slug"], p["entry_at"]), rate_now(p.get("currency")))
+                 for p in positions if p.get("entry_price") is not None and p.get("entry_at")]
+        pairs += [(entry_key("A", t["slug"], t["entry_at"]), rate_now(t.get("currency")))
+                  for t in trades if t.get("entry_at")]
+        return self._buy_store().entry_rates(pairs)
+
+    def _handle_get_band(self):
+        import time
+        now = int(time.time())
+        cfg = self._sim_config()
+        store = self._sim_store()
+        discount = cfg.trade_model.target_sale_discount_from_floor_pct
+        positions = store.get_positions(include_removed=True)  # removed ones keep their past trades' records
+        trades = store.get_trades(limit=10000)
+        rate_now = self._rate_now()
+        rates = self._fixed_rates(positions, trades, rate_now)
+        slugs = {p["slug"] for p in positions} | {t["slug"] for t in trades}
+        facts = market_facts(self.state_store.db_path, slugs)
+        out = build_band(positions, trades, rate_now, rates, facts, [f["slug"] for f in store.get_final_list()],
+                         self._buy_store().slugs(), cfg.buy_list, discount, now)
+        out["exit_discount_pct"] = discount
+        out["missing_prices"] = sorted({p.get("currency") for p in positions
+                                        if p.get("currency") and rate_now(p.get("currency")) is None})
+        self._send_json(out)
+
+    def _ready_for(self, slug: str, cfg, store: SimStore, rate_now, now: int) -> Dict[str, Any]:
+        """The readiness checklist for one collection, from strategy A's results."""
+        pos = store.get_position(slug)
+        trades = self._trades_by_slug(store).get(slug, [])
+        facts = market_facts(self.state_store.db_path, [slug]).get(slug)
+        offer_usd = None
+        if pos:
+            cur = pos.get("currency")
+            if pos.get("entry_price") is not None and pos.get("entry_at"):
+                r = self._fixed_rates([pos], [], rate_now).get(entry_key("A", slug, pos["entry_at"])) or rate_now(cur)
+                offer_usd = pos["entry_price"] * r if r else None
+            elif pos.get("bid"):
+                r = rate_now(cur)
+                offer_usd = pos["bid"] * r if r else None
+        on_final = any(f["slug"] == slug for f in store.get_final_list())
+        return {"pos": pos, "trades": trades, "facts": facts, "offer_usd": offer_usd,
+                "ready": readiness(pos, trades, on_final, facts, offer_usd, (pos or {}).get("chain"), cfg.buy_list,
+                                   slug=slug)}
+
+    def _handle_get_buylist(self):
+        import time
+        now = int(time.time())
+        cfg = self._sim_config()
+        store, buy = self._sim_store(), self._buy_store()
+        discount = cfg.trade_model.target_sale_discount_from_floor_pct
+        rate_now = self._rate_now()
+        last = store.get_last_events()
+        items = []
+        for it in buy.get_items():
+            r = self._ready_for(it["slug"], cfg, store, rate_now, now)
+            pos, trades = r["pos"], r["trades"]
+            d = describe_position(pos, discount) if pos else {}
+            cur = (pos or {}).get("currency") or it.get("currency")
+            rn = rate_now(cur)
+            sold = [t for t in trades if t.get("how") in ("sold", "stoploss", "stoploss_offer")]
+            held = pos is not None and pos.get("entry_price") is not None and pos.get("status") != "removed"
+            hv = held_value(pos, r["facts"], discount) if held else None
+            # What the trading bot would do right now: the simulation's offer, or its listing for a held item
+            if held:
+                suggest = {"action": "sell", "price": pos.get("ask") or (pos["floor"] * (1 - discount / 100.0) if pos.get("floor") else None)}
+            elif pos and pos.get("status") == "bidding" and pos.get("bid"):
+                suggest = {"action": "offer", "price": pos["bid"]}
+            else:
+                suggest = {"action": None, "price": None}
+            suggest["usd"] = suggest["price"] * rn if suggest["price"] and rn else None
+            items.append({
+                **it,
+                "name": (pos or {}).get("name") or it["slug"], "image": (pos or {}).get("image"),
+                "chain": (pos or {}).get("chain"), "currency": cur, "status": (pos or {}).get("status"),
+                "bid_state": (pos or {}).get("bid_state"), "floor": (pos or {}).get("floor"),
+                "floor_usd": pos["floor"] * rn if pos and pos.get("floor") and rn else None,
+                "entry_price": pos.get("entry_price") if held else None, "stop_loss_at": d.get("stop_loss_at"),
+                "held_value": hv, "suggest": suggest,
+                "rounds": len(sold), "wins": sum(1 for t in sold if (t.get("net") or 0) > 0),
+                "realised": sum(t.get("net") or 0 for t in sold), "realised_usd": sum(t.get("net") or 0 for t in sold) * rn if rn else None,
+                "sales_7d": (r["facts"] or {}).get("sales_7d"),
+                "ready": r["ready"], "warnings": buy_warnings(it, pos, trades, r["ready"], cfg.buy_list, now),
+                "last_event": last.get(it["slug"]),
+            })
+        self._send_json({"items": items, "paused_all": buy.paused_all(), "tradable": buy.tradable(),
+                         "live_bot": False})
+
+    def _handle_buylist_action(self, action: str):
+        import time
+        if action not in ("add", "remove", "enable", "pause_all", "ready"):
+            self._send_json({"error": "Unknown action"}, status=404)
+            return
+        body = self._read_json_body()
+        buy = self._buy_store()
+        if action == "pause_all":
+            buy.set_paused_all(bool(body.get("paused")))
+            self.state_store.log_event("buy_list", "Buy List: all trading paused." if body.get("paused")
+                                       else "Buy List: pause all switched off.")
+            self._send_json({"success": True, "paused_all": buy.paused_all()})
+            return
+        slug = self._slug_from(body.get("slug"))
+        if not slug:
+            self._send_json({"error": "Enter an OpenSea collection link or name."}, status=400)
+            return
+        cfg, store = self._sim_config(), self._sim_store()
+        if action == "ready":
+            r = self._ready_for(slug, cfg, store, self._rate_now(), int(time.time()))
+            self._send_json({"slug": slug, "ready": r["ready"], "on_buy_list": slug in buy.slugs()})
+            return
+        if action == "remove":
+            if not buy.remove(slug):
+                self._send_json({"error": "That collection isn't on the Buy List."}, status=404)
+                return
+            self._send_json({"success": True})
+            return
+        if action == "enable":
+            if not buy.set_enabled(slug, bool(body.get("enabled"))):
+                self._send_json({"error": "That collection isn't on the Buy List."}, status=404)
+                return
+            self._send_json({"success": True})
+            return
+        if slug in buy.slugs():
+            self._send_json({"error": "That collection is already on the Buy List."}, status=409)
+            return
+        pos = store.get_position(slug)
+        if pos is None and not self._collection_exists(slug):
+            return
+        r = self._ready_for(slug, cfg, store, self._rate_now(), int(time.time()))
+        discount = cfg.trade_model.target_sale_discount_from_floor_pct
+        buy.add(slug, bot_settings(cfg.simulation, discount), (pos or {}).get("floor"), (pos or {}).get("currency"),
+                r["ready"]["ready"], note=str(body.get("note") or "")[:500])
+        self._send_json({"success": True, "ready": r["ready"]})
 
     # ------------------------------------------------------------------
     # Logs
