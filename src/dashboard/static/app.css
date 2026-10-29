@@ -542,3 +542,8 @@ h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
 .buy-ready { margin-top: 8px; }
 @media (max-width: 980px) { .band-money { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 600px) { .band-money { grid-template-columns: minmax(0, 1fr); } .ready-list { min-width: 0; } }
+.stat-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pchips { display: inline-flex; gap: 2px; padding: 2px; border-radius: 7px; background: color-mix(in srgb, var(--fg) 6%, var(--surface)); }
+.pchip { border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 11px; font-weight: 600; padding: 2px 6px; border-radius: 5px; cursor: pointer; }
+.pchip[aria-pressed="true"] { background: var(--surface); color: var(--fg); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+.box-note { margin: 0 0 -6px; }

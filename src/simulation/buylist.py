@@ -263,10 +263,11 @@ def in_band(usd: Optional[float], cfg) -> bool:
 
 def build_band(positions: List[Dict[str, Any]], trades: List[Dict[str, Any]], rate_now, entry_rates: Dict[str, float],
                facts: Dict[str, Dict[str, Any]], final: Iterable[str], buy: Iterable[str], cfg, exit_discount_pct: float,
-               now: int) -> Dict[str, Any]:
+               now: int, ready_cfg=None) -> Dict[str, Any]:
     """
     Everything the $50-$500 page shows, in dollars. positions/trades: strategy A. rate_now(currency) -> today's
-    dollar rate or None. entry_rates: fixed rates by entry_key().
+    dollar rate or None. entry_rates: fixed rates by entry_key(). ready_cfg: the readiness rules when cfg's
+    dollar range is widened (the Final list and Buy List pages show their collections at any price).
     """
     final, buy = set(final), set(buy)
     by_slug: Dict[str, List[Dict[str, Any]]] = {}
@@ -292,6 +293,7 @@ def build_band(positions: List[Dict[str, Any]], trades: List[Dict[str, Any]], ra
                              "floor": p.get("floor"), "floor_usd": p["floor"] * r if p.get("floor") and r else None,
                              "gap_pct": d.get("gap_pct"), "est_net_usd": d["est_net"] * r if d.get("est_net") is not None and r else None,
                              "bid_days": round((p.get("bid_seconds") or 0) / DAY, 1),
+                             "placed_at": p.get("round_started_at") or p.get("created_at"),
                              "times_outbid": p.get("times_outbid") or 0, "round": p.get("round") or 1})
         elif p.get("entry_price") is not None and p["status"] in ("holding", "stopped"):
             r = fixed(p["slug"], p.get("entry_at"), cur)
@@ -361,7 +363,8 @@ def build_band(positions: List[Dict[str, Any]], trades: List[Dict[str, Any]], ra
         fills = len(ts) + (1 if any(h["slug"] == s for h in held) else 0)
         offer_usd = next((b["bid_usd"] for b in bids if b["slug"] == s), None) or \
             next((h["cost_usd"] for h in held if h["slug"] == s), None) or (ts[0]["cost_usd"] if ts else None)
-        ready = readiness(p or None, by_slug.get(s, []), s in final, facts.get(s), offer_usd, p.get("chain"), cfg)
+        ready = readiness(p or None, by_slug.get(s, []), s in final, facts.get(s), offer_usd, p.get("chain"),
+                          ready_cfg or cfg, slug=s)
         score.append({"slug": s, "name": names.get(s, s), "image": p.get("image"), "chain": p.get("chain"),
                       "rounds": len(ts), "wins": sum(1 for t in ts if t["net_usd"] > 0),
                       "profit_usd": sum(t["net_usd"] for t in ts),

@@ -189,7 +189,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             "/api/chains": lambda: self._handle_get_chains(),
             "/api/simulation": lambda: self._handle_get_simulation(),
             "/api/final": lambda: self._handle_get_final(),
-            "/api/band": lambda: self._handle_get_band(),
+            "/api/band": lambda: self._handle_get_band(query),
             "/api/buylist": lambda: self._handle_get_buylist(),
         }
         if path in routes:
@@ -1018,7 +1018,11 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                   for t in trades if t.get("entry_at")]
         return self._buy_store().entry_rates(pairs)
 
-    def _handle_get_band(self):
+    def _handle_get_band(self, query=None):
+        """
+        The $50-$500 page. With scope=final or scope=buy: the same numbers for the Final list or the Buy List
+        collections, at any price.
+        """
         import time
         now = int(time.time())
         cfg = self._sim_config()
@@ -1026,12 +1030,23 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         discount = cfg.trade_model.target_sale_discount_from_floor_pct
         positions = store.get_positions(include_removed=True)  # removed ones keep their past trades' records
         trades = store.get_trades(limit=10000)
+        final = [f["slug"] for f in store.get_final_list()]
+        buy = self._buy_store().slugs()
+        band_cfg = cfg.buy_list
+        scope = ((query or {}).get("scope") or [""])[0]
+        if scope in ("final", "buy"):
+            keep = set(final if scope == "final" else buy)
+            positions = [p for p in positions if p["slug"] in keep]
+            trades = [t for t in trades if t["slug"] in keep]
+            band_cfg = band_cfg.model_copy(update={"band_min_usd": 0.0, "band_max_usd": float("inf")})
         rate_now = self._rate_now()
         rates = self._fixed_rates(positions, trades, rate_now)
         slugs = {p["slug"] for p in positions} | {t["slug"] for t in trades}
         facts = market_facts(self.state_store.db_path, slugs)
-        out = build_band(positions, trades, rate_now, rates, facts, [f["slug"] for f in store.get_final_list()],
-                         self._buy_store().slugs(), cfg.buy_list, discount, now)
+        out = build_band(positions, trades, rate_now, rates, facts, final, buy, band_cfg, discount, now,
+                         ready_cfg=cfg.buy_list)
+        out["scope"] = scope or "band"
+        out["band"]["max_usd"] = None if scope in ("final", "buy") else out["band"]["max_usd"]
         out["exit_discount_pct"] = discount
         out["missing_prices"] = sorted({p.get("currency") for p in positions
                                         if p.get("currency") and rate_now(p.get("currency")) is None})

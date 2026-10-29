@@ -79,23 +79,98 @@
     return '<td><div class="band-name">' + N.art(r.slug, r.image) + "<div>" + osLink(r.slug, r.name || r.slug) +
       '<div class="sub">' + esc(tags.filter(Boolean).join(" · ")) + (sub ? " · " + sub : "") + "</div></div></div></td>";
   }
-  function stat(label, value, sub, valueCls, tip) {
-    return '<div class="card stat"' + (tip ? ' title="' + esc(tip) + '"' : "") + '><span class="stat-label">' + esc(label) + '</span><span class="stat-value num ' + (valueCls || "") + '">' + value +
-      '</span><span class="stat-sub">' + sub + "</span></div>";
+  // ---------- Money boxes, each with its own period (1 day, 7 days, 30 days or all) ----------
+  var PERIODS = [["1", "1 day", 1], ["7", "7 days", 7], ["30", "30 days", 30], ["all", "All", null]];
+  var periods = {};
+  try { periods = JSON.parse(localStorage.getItem("boxPeriods") || "{}") || {}; } catch (e) {}
+  var panels = {};  // container id -> {bids, held, trades}
+
+  function since(key) {
+    var p = PERIODS.filter(function (x) { return x[0] === (periods[key] || "all"); })[0];
+    return p && p[2] ? Date.now() / 1000 - p[2] * 86400 : null;
+  }
+  function periodWords(key) {
+    var p = periods[key] || "all";
+    return p === "1" ? "in the last day" : p === "7" ? "in the last 7 days" : p === "30" ? "in the last 30 days" : "";
+  }
+  function within(ts, from) { return from == null || (isNum(ts) && ts >= from); }
+
+  function stat(panel, key, label, value, sub, valueCls, tip) {
+    var cur = periods[panel + ":" + key] || "all";
+    var chips = PERIODS.map(function (p) {
+      return '<button type="button" class="pchip" data-panel="' + panel + '" data-box="' + key + '" data-period="' + p[0] + '" aria-pressed="' + (cur === p[0]) + '">' +
+        (p[0] === "all" ? "All" : p[0] + "d") + "</button>";
+    }).join("");
+    return '<div class="card stat"' + (tip ? ' title="' + esc(tip) + '"' : "") + '><div class="stat-top"><span class="stat-label">' + esc(label) +
+      '</span><span class="pchips" role="group" aria-label="Period for ' + esc(label) + '">' + chips + "</span></div>" +
+      '<span class="stat-value num ' + (valueCls || "") + '">' + value + '</span><span class="stat-sub">' + sub + "</span></div>";
   }
 
-  function moneyPanel(bids, held, trades) {
-    var offers = 0, onTop = 0, cost = 0, value = 0, unvalued = 0, win = 0, loss = 0, nWin = 0, nLoss = 0;
-    bids.forEach(function (b) { offers += b.bid_usd; if (b.bid_state === "top" || b.bid_state === "alone") onTop++; });
-    held.forEach(function (h) { cost += h.cost_usd; if (isNum(h.value_usd)) value += h.value_usd; else unvalued++; });
-    trades.forEach(function (t) { if (t.net_usd > 0) { win += t.net_usd; nWin++; } else if (t.net_usd < 0) { loss += t.net_usd; nLoss++; } });
-    var realised = win + loss, tied = realised - cost - offers, total = realised + (value - cost);
-    return stat("In open offers", N.usd(offers), bids.length + (bids.length === 1 ? " offer" : " offers") + ", " + onTop + " the best offer. If every offer filled at once, the wallet would need this much.", "", "Our offers waiting to be taken, at today's coin prices") +
-      stat("In held items", N.usd(cost), held.length + (held.length === 1 ? " item" : " items") + " bought, worth " + N.usd(value) + " today" + (unvalued ? " (" + unvalued + " with no price yet)" : ""), "", "What we paid. Today's worth is the lower of the last real sale and our usual price under the floor, after fees and gas") +
-      stat("Profit from winning sales", signedUsd(win), nWin + (nWin === 1 ? " profitable sale" : " profitable sales") + ", after OpenSea fee, royalty and gas", cls(win)) +
-      stat("Profit after losses", signedUsd(realised), nLoss ? signedUsd(loss) + " from " + nLoss + (nLoss === 1 ? " losing sale" : " losing sales") : "No losing sales", cls(realised), "Winning sales minus losing sales (stop-losses)") +
-      stat("After money tied up", signedUsd(tied), "Profit after losses, minus the money in held items and in open offers", cls(tied), "What you'd be up or down if the held items were worth nothing and every offer were spent") +
-      stat("Overall profit or loss", signedUsd(total), "Profit after losses, plus what held items would bring today, minus what they cost", cls(total));
+  function sums(d, from) {
+    var o = { offers: 0, nOffers: 0, onTop: 0, cost: 0, value: 0, nHeld: 0, unvalued: 0, win: 0, loss: 0, nWin: 0, nLoss: 0 };
+    d.bids.forEach(function (b) {
+      if (!within(b.placed_at, from)) return;
+      o.offers += b.bid_usd; o.nOffers++; if (b.bid_state === "top" || b.bid_state === "alone") o.onTop++;
+    });
+    d.held.forEach(function (h) {
+      if (!within(h.entry_at, from)) return;
+      o.cost += h.cost_usd; o.nHeld++; if (isNum(h.value_usd)) o.value += h.value_usd; else o.unvalued++;
+    });
+    d.trades.forEach(function (t) {
+      if (!within(t.exit_at, from)) return;
+      if (t.net_usd > 0) { o.win += t.net_usd; o.nWin++; } else if (t.net_usd < 0) { o.loss += t.net_usd; o.nLoss++; }
+    });
+    o.realised = o.win + o.loss;
+    return o;
+  }
+  function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
+  function when(words) { return words ? " " + words : ""; }
+
+  function renderMoney(panel) {
+    var d = panels[panel]; if (!d || !$(panel)) return;
+    function k(box) { return panel + ":" + box; }
+    var a = sums(d, since(k("offers"))), h = sums(d, since(k("held"))), w = sums(d, since(k("win"))), r = sums(d, since(k("realised"))),
+        t = sums(d, since(k("tied"))), o = sums(d, since(k("total")));
+    var tied = t.realised - t.cost - t.offers, total = o.realised + (o.value - o.cost);
+    $(panel).innerHTML =
+      stat(panel, "offers", "In open offers", N.usd(a.offers), plural(a.nOffers, "offer", "offers") + " placed" + when(periodWords(k("offers"))) + ", " + a.onTop +
+        " the best offer. If every offer filled at once, the wallet would need this much.", "", "Our offers waiting to be taken, at today's coin prices") +
+      stat(panel, "held", "In held items", N.usd(h.cost), plural(h.nHeld, "item", "items") + " bought" + when(periodWords(k("held"))) + " and still held, worth " + N.usd(h.value) + " today" +
+        (h.unvalued ? " (" + h.unvalued + " with no price yet)" : ""), "", "What we paid. Today's worth is the lower of the last real sale and our usual price under the floor, after fees and gas") +
+      stat(panel, "win", "Profit from winning sales", signedUsd(w.win), plural(w.nWin, "profitable sale", "profitable sales") + when(periodWords(k("win"))) + ", after OpenSea fee, royalty and gas", cls(w.win)) +
+      stat(panel, "realised", "Profit after losses", signedUsd(r.realised), (r.nLoss ? signedUsd(r.loss) + " from " + plural(r.nLoss, "losing sale", "losing sales") : "No losing sales") +
+        when(periodWords(k("realised"))), cls(r.realised), "Winning sales minus losing sales (stop-losses)") +
+      stat(panel, "tied", "After money tied up", signedUsd(tied), "Profit after losses, minus the money in held items and in open offers" + when(periodWords(k("tied"))), cls(tied),
+        "What you'd be up or down if the held items were worth nothing and every offer were spent. With a period: sales, buys and offers from that period") +
+      stat(panel, "total", "Overall profit or loss", signedUsd(total), "Profit after losses, plus what held items would bring today, minus what they cost" + when(periodWords(k("total"))), cls(total),
+        "With a period: sales and items bought in that period");
+  }
+  function moneyInto(panel, bids, held, trades) {
+    panels[panel] = { bids: bids, held: held, trades: trades };
+    renderMoney(panel);
+  }
+  document.addEventListener("click", function (e) {
+    var b = e.target.closest("button.pchip"); if (!b) return;
+    var panel = b.getAttribute("data-panel");
+    periods[panel + ":" + b.getAttribute("data-box")] = b.getAttribute("data-period");
+    try { localStorage.setItem("boxPeriods", JSON.stringify(periods)); } catch (err) {}
+    renderMoney(panel);
+  });
+
+  // The same boxes for the Final list and Buy List pages: their collections at any price
+  var scoped = { final: false, buy: false };
+  function loadScoped(scope) {
+    var id = scope === "final" ? "finMoney" : "buyMoney";
+    if (!$(id) || scoped[scope]) return;
+    scoped[scope] = true;
+    N.api("/api/band?scope=" + scope).then(function (r) {
+      $(id + "Note").textContent = "Simulation results for the " + (scope === "final" ? "Final list" : "Buy List") +
+        " collections, at any price (strategy A). Each box has its own period.";
+      if (!r.bids.length && !r.held.length && !r.trades.length) {
+        $(id).innerHTML = '<div class="card empty" style="grid-column:1/-1">No simulation results for these collections yet.</div>';
+        panels[id] = null;
+      } else moneyInto(id, r.bids, r.held, r.trades);
+    }, function () {}).then(function () { scoped[scope] = false; });
   }
 
   function renderBand() {
@@ -113,7 +188,7 @@
     var bids = d.bids.filter(keep), held = d.held.filter(keep), trades = d.trades.filter(keep), score = d.scorecard.filter(keep);
     var miss = (d.missing_prices || []).length ? '<div class="banner warn"><span>No dollar price for ' + esc(d.missing_prices.join(", ")) + " right now, so collections priced in it are left out.</span></div>" : "";
     $("bandBanner").innerHTML = miss;
-    $("bandMoney").innerHTML = moneyPanel(bids, held, trades);
+    moneyInto("bandMoney", bids, held, trades);
 
     $("bandBidsSub").textContent = bids.length + (bids.length === 1 ? " collection" : " collections");
     $("bandBids").innerHTML = bids.length ? '<div class="tbl-scroll"><table class="tbl sim-trades band-tbl"><thead><tr><th>Collection</th><th>Our offer</th><th>Best other</th><th>Floor</th><th title="Days our offer has been up">Bidding</th><th>Outbid</th><th>Ready</th><th></th></tr></thead><tbody>' +
@@ -216,6 +291,7 @@
       '<div class="empty"><h3>Nothing on the Buy List yet</h3>Use "+ Buy List" on the Simulation, $50–$500 or Final list pages, or add one below.</div>';
   }
   function loadBuy() {
+    loadScoped("buy");
     if (buyBusy) return;
     if (document.querySelector("#page-buy details[open]") && buy) return;
     buyBusy = true;
@@ -253,8 +329,9 @@
     }, function (err) { N.toast(err.message || "Couldn't add it."); }).then(function () { btn.disabled = false; });
   });
 
-  window.BandPage = { load: loadBand, loadBuy: loadBuy };
+  window.BandPage = { load: loadBand, loadBuy: loadBuy, loadFinalMoney: function () { loadScoped("final"); } };
   var start = (location.hash || "").slice(1);
   if (start === "band") loadBand();
   if (start === "buy") loadBuy();
+  if (start === "final") loadScoped("final");
 })();
