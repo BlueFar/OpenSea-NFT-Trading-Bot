@@ -161,7 +161,8 @@ buy_list:
   ready:                            # The "ready" checklist shown beside each collection
     min_rounds: 2                   # At least this many bought-and-sold rounds, all profitable...
     alt_bid_days: 14                # ...or this many days of bidding with 1 profitable round
-    min_sales_7d: 5                 # At least this many sales in the last 7 days (buyers to sell to)
+    min_sales_7d: 2                 # At least this many sales in the last 7 days (buyers to sell to)...
+    min_sales_14d: 4                # ...and at least this many in the last 14 days (0 = off)
     risky_chains: [abstract]        # Chains shutting down or at risk (Abstract closes 15 Dec 2026)
     risky_collections:              # Collections with a known risk the chain doesn't show: slug -> why
       och-genesis-ring: "its game runs on Abstract, which shuts down 15 Dec 2026"

@@ -140,7 +140,8 @@ def market_facts(db_path: str, slugs: Iterable[str]) -> Dict[str, Dict[str, Any]
     """
     From the bot's latest rule check of each collection that got as far as reading its sales: sales in the 7 days
     before that check, and the latest sale at about the floor price (90-115% of the floor, not a rare item and
-    not an accepted offer).
+    not an accepted offer). Also sales in the 14 days before that check, pieced together from the daily sales
+    counts of that check and the earlier ones (each check stores 7 days), with how many of the 14 days were covered.
     """
     wanted = list(dict.fromkeys(slugs))
     out: Dict[str, Dict[str, Any]] = {}
@@ -156,9 +157,44 @@ def market_facts(db_path: str, slugs: Iterable[str]) -> Dict[str, Dict[str, Any]
                     "  AND details LIKE '%\"floor_sales\"%' GROUP BY slug) m ON h.slug = m.slug AND h.date_str = m.d", part).fetchall()
                 for slug, details, day in rows:
                     out[slug] = _facts(details, day)
+                daily = conn.execute(
+                    f"SELECT slug, date_str, details FROM candidate_history WHERE slug IN ({','.join('?' * len(part))})"
+                    "  AND date_str >= date('now', '-60 days') AND details LIKE '%\"sales_daily\"%' ORDER BY slug, date_str",
+                    part).fetchall()
+                by_slug: Dict[str, List] = {}
+                for slug, day, details in daily:
+                    by_slug.setdefault(slug, []).append((day, details))
+                for slug, checks in by_slug.items():
+                    if slug in out:
+                        out[slug].update(_sales_14d(checks, out[slug].get("checked_on")))
     except sqlite3.OperationalError:  # the bot hasn't created its tables yet
         return {}
     return out
+
+
+def _sales_14d(checks: List, last_day: Optional[str]) -> Dict[str, Any]:
+    """
+    checks: (date_str, details) of a collection's rule checks, oldest first. Each check's sales_daily lists the 7
+    days before it. A later check's count for a day wins. Returns sales in the 14 days before last_day and how
+    many of those days had a count.
+    """
+    from datetime import date, timedelta
+    try:
+        end = date.fromisoformat(last_day)
+    except (TypeError, ValueError):
+        return {"sales_14d": None, "sales_14d_days": 0}
+    window = {(end - timedelta(days=n)).isoformat() for n in range(1, 15)}
+    per_day: Dict[str, int] = {}
+    for _day, details in checks:
+        try:
+            d = json.loads(details) if details else {}
+        except ValueError:
+            continue
+        for entry in d.get("sales_daily") or []:
+            if isinstance(entry, (list, tuple)) and len(entry) == 2 and entry[0] in window \
+                    and isinstance(entry[1], (int, float)):
+                per_day[entry[0]] = int(entry[1])
+    return {"sales_14d": sum(per_day.values()) if per_day else None, "sales_14d_days": len(per_day)}
 
 
 def _facts(details: Optional[str], day: Optional[str]) -> Dict[str, Any]:
@@ -230,10 +266,33 @@ def readiness(pos: Optional[Dict[str, Any]], trades: List[Dict[str, Any]], on_fi
                                             f"bidding with 1 profitable round)", "ok": track_ok, "detail": detail})
 
     s7 = (facts or {}).get("sales_7d")
-    checks.append({"key": "sales", "label": f"At least {rc.min_sales_7d} sales in the last 7 days",
-                   "ok": None if s7 is None else s7 >= rc.min_sales_7d,
-                   "detail": "not checked yet" if s7 is None else
-                   f"{s7} sale{'s' if s7 != 1 else ''}" + (f" (bot's check of {facts['checked_on']})" if facts.get("checked_on") else "")})
+    s14 = (facts or {}).get("sales_14d")
+    s14_days = (facts or {}).get("sales_14d_days") or 0
+    week_ok = None if s7 is None else s7 >= rc.min_sales_7d
+    if rc.min_sales_14d <= 0:
+        fortnight_ok = True
+    elif s14 is not None and s14 >= rc.min_sales_14d:
+        fortnight_ok = True
+    elif s14_days >= 14:
+        fortnight_ok = False
+    else:
+        fortnight_ok = None  # not enough daily counts yet to know
+    sales_ok = False if (week_ok is False or fortnight_ok is False) else (
+        None if (week_ok is None or fortnight_ok is None) else True)
+    label = f"At least {rc.min_sales_7d} sales in the last 7 days"
+    if rc.min_sales_14d > 0:
+        label += f" and {rc.min_sales_14d} in the last 14 days"
+    if s7 is None:
+        detail = "not checked yet"
+    else:
+        detail = f"{s7} sale{'s' if s7 != 1 else ''} in 7 days"
+        if rc.min_sales_14d > 0:
+            detail += (f", {s14} in 14 days" if s14 is not None else ", 14 days unknown")
+            if s14 is not None and s14_days < 14:
+                detail += f" ({s14_days} of 14 days counted)"
+        if facts.get("checked_on"):
+            detail += f" (bot's check of {facts['checked_on']})"
+    checks.append({"key": "sales", "label": label, "ok": sales_ok, "detail": detail})
 
     slug = slug or (pos or {}).get("slug")
     risky_chain = (chain or "").lower() in {c.lower() for c in rc.risky_chains}
