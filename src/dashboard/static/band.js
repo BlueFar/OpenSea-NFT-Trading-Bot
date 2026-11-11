@@ -188,9 +188,10 @@
     scoped[scope] = true;
     N.api("/api/band?scope=" + scope).then(function (r) {
       $(id + "Note").textContent = "Simulation results for the " + (scope === "final" ? "Final list" : "Buy List") +
-        " collections, at any price (strategy A). Each box has its own period.";
+        " collections, at any price (strategy A), counting only items bought after each collection joined the " +
+        (scope === "final" ? "Final list" : "Buy List") + ". Open offers always count. Each box has its own period.";
       if (!r.bids.length && !r.held.length && !r.trades.length) {
-        $(id).innerHTML = '<div class="card empty" style="grid-column:1/-1">No simulation results for these collections yet.</div>';
+        $(id).innerHTML = '<div class="card empty" style="grid-column:1/-1">No simulation results for these collections since they joined this list.</div>';
         panels[id] = null;
       } else moneyInto(id, r.bids, r.held, r.trades);
     }, function () {}).then(function () { scoped[scope] = false; });

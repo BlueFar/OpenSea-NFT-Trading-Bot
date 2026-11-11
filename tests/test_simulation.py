@@ -691,6 +691,10 @@ def test_dashboard_final_list_and_interval(tmp_path):
         assert status == 200 and item["slug"] == "smol-brains" and item["added_by"] == "you" and item["note"] == "my pick"
         assert item["status"] == "bidding" and item["trades"] == 0 and item["realised_net"] is None
         assert _call("GET", "/api/simulation", env)[1]["final"] == ["smol-brains"]
+        status, r = _call("GET", "/api/band?scope=final", env)
+        assert status == 200 and r["scope"] == "final" and r["trades"] == [] and r["held"] == []
+        status, r = _call("GET", "/api/band?scope=buy", env)
+        assert status == 200 and r["scope"] == "buy"
 
         assert _call("POST", "/api/final/remove", env, {"slug": "smol-brains"})[0] == 200
         assert _call("GET", "/api/final", env)[1]["items"] == []

@@ -68,6 +68,28 @@ def test_money_panel_boxes():
     assert round(m["total_usd"], 2) == round(80.0 + 347.2 - 200.0, 2)
 
 
+def test_list_results_start_when_the_collection_joined_the_list():
+    joined = NOW - 10 * DAY
+    old_sale = trade("x", 0.1, 0.05, entry_at=joined - 3 * DAY, exit_at=joined - 2 * DAY)
+    straddle = trade("x", 0.1, 0.02, entry_at=joined - DAY, exit_at=joined + DAY)  # bought before joining
+    new_sale = trade("x", 0.1, 0.03, entry_at=joined + 2 * DAY, exit_at=joined + 3 * DAY)
+    old_held = pos("y", status="holding", entry_price=0.1, entry_at=joined - DAY)
+    new_held = pos("z", status="holding", entry_price=0.1, entry_at=joined + DAY)
+    offer = pos("w", bid=0.05, round_started_at=joined - 5 * DAY)  # placed before joining, still live
+    since = {s: joined for s in "xyzw"}
+    out = build_band([pos("x"), old_held, new_held, offer], [old_sale, straddle, new_sale], rate, {}, {}, "xyzw", [],
+                     BuyListConfig(band_min_usd=0.0, band_max_usd=float("inf")), 5.0, NOW, since=since)
+    assert [t["entry_at"] for t in out["trades"]] == [joined + 2 * DAY]
+    assert [h["slug"] for h in out["held"]] == ["z"]
+    assert [b["slug"] for b in out["bids"]] == ["w"]
+    assert round(out["money"]["realised_usd"], 6) == 60.0 and out["money"]["sales"] == 1
+    # The ready checklist still sees the whole simulation record (3 profitable rounds)
+    x = next(r for r in out["scorecard"] if r["slug"] == "x")
+    assert "3 rounds" in next(c for c in x["ready"]["checks"] if c["key"] == "track")["detail"]
+    # Without since, everything counts
+    assert band([pos("x")], [old_sale, straddle, new_sale])["money"]["sales"] == 3
+
+
 def test_held_value_uses_the_lower_of_last_sale_and_floor():
     p = pos("x", status="holding", entry_price=0.1, entry_at=NOW, floor=0.3)
     low = held_value(p, {"last_sale": 0.15, "last_sale_currency": "WETH"}, 5.0)

@@ -322,16 +322,22 @@ def in_band(usd: Optional[float], cfg) -> bool:
 
 def build_band(positions: List[Dict[str, Any]], trades: List[Dict[str, Any]], rate_now, entry_rates: Dict[str, float],
                facts: Dict[str, Dict[str, Any]], final: Iterable[str], buy: Iterable[str], cfg, exit_discount_pct: float,
-               now: int, ready_cfg=None) -> Dict[str, Any]:
+               now: int, ready_cfg=None, since: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
     """
     Everything the $50-$500 page shows, in dollars. positions/trades: strategy A. rate_now(currency) -> today's
     dollar rate or None. entry_rates: fixed rates by entry_key(). ready_cfg: the readiness rules when cfg's
     dollar range is widened (the Final list and Buy List pages show their collections at any price).
+    since: slug -> when it joined the Final list or Buy List. Given, the money boxes and the held and sold lists
+    count only items bought at or after that time, so a list's results start when the collection joined it.
+    Open offers are live, so they always count. The ready checklist still uses the whole simulation record.
     """
     final, buy = set(final), set(buy)
     by_slug: Dict[str, List[Dict[str, Any]]] = {}
     for t in trades:
         by_slug.setdefault(t["slug"], []).append(t)
+
+    def before_joining(slug, entry_at):
+        return since is not None and (entry_at or 0) < (since.get(slug) or 0)
 
     def fixed(slug, entry_at, cur):
         r = entry_rates.get(entry_key("A", slug, entry_at))
@@ -355,6 +361,8 @@ def build_band(positions: List[Dict[str, Any]], trades: List[Dict[str, Any]], ra
                              "placed_at": p.get("round_started_at") or p.get("created_at"),
                              "times_outbid": p.get("times_outbid") or 0, "round": p.get("round") or 1})
         elif p.get("entry_price") is not None and p["status"] in ("holding", "stopped"):
+            if before_joining(p["slug"], p.get("entry_at")):
+                continue
             r = fixed(p["slug"], p.get("entry_at"), cur)
             cost = p["entry_price"] * r if r else None
             if not in_band(cost, cfg):
@@ -376,6 +384,8 @@ def build_band(positions: List[Dict[str, Any]], trades: List[Dict[str, Any]], ra
     for t in trades:
         if t.get("how") not in SALE_KINDS:
             continue  # "removed" is a valuation, not a sale
+        if before_joining(t["slug"], t.get("entry_at")):
+            continue
         r = fixed(t["slug"], t.get("entry_at"), t.get("currency"))
         cost = t["entry_price"] * r if r and t.get("entry_price") else None
         if not in_band(cost, cfg):
