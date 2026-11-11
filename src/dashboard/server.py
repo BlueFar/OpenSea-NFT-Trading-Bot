@@ -1034,8 +1034,12 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         buy = self._buy_store().slugs()
         band_cfg = cfg.buy_list
         scope = ((query or {}).get("scope") or [""])[0]
+        since = None
         if scope in ("final", "buy"):
             keep = set(final if scope == "final" else buy)
+            # Each list's results start when the collection joined that list
+            joined = store.get_final_list() if scope == "final" else self._buy_store().get_items()
+            since = {j["slug"]: int(j.get("added_at") or 0) for j in joined}
             positions = [p for p in positions if p["slug"] in keep]
             trades = [t for t in trades if t["slug"] in keep]
             band_cfg = band_cfg.model_copy(update={"band_min_usd": 0.0, "band_max_usd": float("inf")})
@@ -1044,7 +1048,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         slugs = {p["slug"] for p in positions} | {t["slug"] for t in trades}
         facts = market_facts(self.state_store.db_path, slugs)
         out = build_band(positions, trades, rate_now, rates, facts, final, buy, band_cfg, discount, now,
-                         ready_cfg=cfg.buy_list)
+                         ready_cfg=cfg.buy_list, since=since)
         out["scope"] = scope or "band"
         out["band"]["max_usd"] = None if scope in ("final", "buy") else out["band"]["max_usd"]
         out["exit_discount_pct"] = discount

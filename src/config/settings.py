@@ -178,7 +178,8 @@ class BuyReadyConfig(BaseModel):
     """When a collection counts as ready for the Buy List (shown as a checklist; adding is always up to the owner)."""
     min_rounds: int = Field(2, ge=1)                # At least this many bought-and-sold rounds, all profitable...
     alt_bid_days: float = Field(14.0, ge=0)         # ...or this many days of bidding with 1 profitable round
-    min_sales_7d: int = Field(5, ge=0)              # Real buyers to sell to: sales in the last 7 days
+    min_sales_7d: int = Field(2, ge=0)              # Real buyers to sell to: sales in the last 7 days...
+    min_sales_14d: int = Field(4, ge=0)             # ...and in the last 14 days (0 = off)
     risky_chains: List[str] = Field(default_factory=lambda: ["abstract"])  # Chains shutting down or at risk
     risky_collections: Dict[str, str] = Field(default_factory=dict)        # slug -> why (e.g. its game's chain)
 
